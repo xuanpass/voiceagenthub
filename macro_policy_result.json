@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\wangxuan\.workbuddy\plugins\marketplaces\cb_teams_marketplace\plugins\finance-data\skills\neodata-financial-search\scripts\query.py", line 137, in <module>
-    main()
-    ~~~~^^
-  File "C:\Users\wangxuan\.workbuddy\plugins\marketplaces\cb_teams_marketplace\plugins\finance-data\skills\neodata-financial-search\scripts\query.py", line 133, in main
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-UnicodeEncodeError: 'gbk' codec can't encode character '\uf071' in position 5812: illegal multibyte sequence
