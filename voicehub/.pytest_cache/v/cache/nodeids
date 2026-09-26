@@ -1,0 +1,22 @@
+[
+  "tests/test_backends.py::test_openai_compat_caps_history",
+  "tests/test_backends.py::test_openai_compat_context_passthrough",
+  "tests/test_backends.py::test_openai_compat_isolates_sessions",
+  "tests/test_backends.py::test_openai_compat_keeps_history",
+  "tests/test_backends.py::test_routerprocessor_session_format",
+  "tests/test_orchestrator.py::test_abort_stops_streaming",
+  "tests/test_orchestrator.py::test_handoff_order_and_context",
+  "tests/test_orchestrator.py::test_review_target_before_reviewer",
+  "tests/test_orchestrator.py::test_roundtable_abort_cancels_tasks",
+  "tests/test_orchestrator.py::test_roundtable_yields_all",
+  "tests/test_router.py::test_active_is_per_connection",
+  "tests/test_router.py::test_collab_detection",
+  "tests/test_router.py::test_collab_via_handoff_word",
+  "tests/test_router.py::test_collab_via_review_word",
+  "tests/test_router.py::test_config_loads",
+  "tests/test_router.py::test_handoff_direction_by_utterance",
+  "tests/test_router.py::test_no_false_collab",
+  "tests/test_router.py::test_review_direction_by_utterance",
+  "tests/test_router.py::test_route_by_alias",
+  "tests/test_router.py::test_route_fallback_active"
+]

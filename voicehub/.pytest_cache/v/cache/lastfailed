@@ -1,0 +1,3 @@
+{
+  "tests/test_backends.py::test_routerprocessor_session_format": true
+}
