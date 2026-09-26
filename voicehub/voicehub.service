@@ -1,0 +1,22 @@
+[Unit]
+Description=VoiceHub multi-agent voice hub (Pipecat 1.11 + WebRTC)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wangxuan
+WorkingDirectory=/home/wangxuan/voicehub
+ExecStart=/bin/bash /home/wangxuan/voicehub/start.sh
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# 日志走 journald（journalctl -u voicehub -f）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voicehub
+
+[Install]
+WantedBy=multi-user.target

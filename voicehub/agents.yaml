@@ -1,0 +1,61 @@
+# VoiceHub - 多智能体语音中枢路由配置
+# 部署机: 192.168.123.101 (wangxuan@wangxuan-20aseb3)
+#   OpenClaw / Hermes 同机 (.101)
+#   WorkBuddy / CherryStudio 在 .109, 经 .109 上的桥接代理对外暴露
+# 凭据用 ${ENV} 占位, 见 .env.example; 真实值写入 .101 的 .env
+
+default_agent: openclaw
+
+server:
+  host: 0.0.0.0
+  port: 8765
+
+stt:
+  model: small
+  device: cpu
+  compute_type: int8
+
+agents:
+  openclaw:
+    display: 小克
+    aliases: ["小克", "openclaw", "克劳", "克老", "克劳德"]
+    adapter: openclaw          # 调用本机 openclaw CLI (走 Gateway 自动鉴权)
+    endpoint: ""               # 不使用 HTTP, CLI 本地调用
+    session_prefix: voice-openclaw
+    tts_voice: zh-CN-XiaoxiaoNeural
+
+  hermes:
+    display: 赫尔墨斯
+    aliases: ["赫尔墨斯", "hermes", "爱马仕", "赫尔墨", "赫敏"]
+    adapter: openai_compat
+    endpoint: "http://127.0.0.1:8642/v1/chat/completions"   # Hermes OpenAI Bridge (同机)
+    api_key: "${HERMES_KEY}"      # API_SERVER_KEY (.hermes/.env)
+    model: auto
+    auth_scheme: Bearer
+    tts_voice: zh-CN-YunyangNeural
+    session_prefix: voice-hermes
+
+  workbuddy:
+    display: 小助
+    aliases: ["小助", "workbuddy", "工作搭档", "工作伙伴"]
+    # disabled: 桌面端无免鉴权本地 chat API, 设置里也无本地 Code API 开关,
+    # codebuddy CLI -p 模式在本机独立子进程会卡死鉴权; 暂无法接入。
+    # 适配器代码已就绪, 将来 WorkBuddy 暴露 API 后去掉 disabled 即可启用。
+    disabled: true
+    adapter: workbuddy
+    bin_path: "C:/Users/wangxuan/AppData/Local/Programs/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"
+    model: "hy3"
+    tts_voice: zh-CN-YunxiNeural
+    session_prefix: voice-workbuddy
+
+  cherrystudio:
+    display: 小樱
+    aliases: ["小樱", "樱桃", "cherry", "cherrystudio"]
+    adapter: openai_compat
+    # .109 上 CherryStudio 绑定 127.0.0.1:23333, 仅本机可达;
+    # .101 的 VoiceHub 经 .109 桥接 forward.py (:8801) 访问
+    endpoint: "http://192.168.123.109:8801/v1/chat/completions"
+    api_key: "${CHERRY_KEY}"       # CherryStudio API 服务密钥
+    model: "openrouter:openrouter/free"   # CherryStudio 要求 provider:model 格式
+    tts_voice: zh-CN-XiaoyiNeural
+    session_prefix: voice-cherry

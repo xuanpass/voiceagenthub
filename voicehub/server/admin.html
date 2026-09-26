@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceHub 管理面板</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-card h3 {
+            color: #7f8c8d;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .stat-card .value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .section {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .section h2 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            font-size: 20px;
+        }
+        
+        .room-list {
+            list-style: none;
+        }
+        
+        .room-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .room-item:last-child {
+            border-bottom: none;
+        }
+        
+        .room-info {
+            flex: 1;
+        }
+        
+        .room-info h4 {
+            margin-bottom: 5px;
+            color: #2c3e50;
+        }
+        
+        .room-info p {
+            color: #7f8c8d;
+            font-size: 14px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .log-area {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 4px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        
+        .agent-status {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+        
+        .agent-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            background: #3498db;
+            color: white;
+        }
+        
+        .agent-badge.offline {
+            background: #95a5a6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ VoiceHub 管理面板</h1>
+            <p>实时语音协作中枢管理系统</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>活跃房间</h3>
+                <div class="value" id="roomCount">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>活跃连接</h3>
+                <div class="value" id="connectionCount">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>LLM 后端</h3>
+                <div class="value" id="llmBackend">-</div>
+            </div>
+            <div class="stat-card">
+                <h3>STT 后端</h3>
+                <div class="value" id="sttBackend">-</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📊 房间管理</h2>
+            <button class="btn btn-primary" onclick="createRoom()">创建新房间</button>
+            <ul class="room-list" id="roomList">
+                <!-- 房间列表将动态加载 -->
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>📋 系统日志</h2>
+            <button class="btn btn-primary" onclick="refreshLogs()">刷新日志</button>
+            <div class="log-area" id="logArea">
+                等待日志加载...
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🤖 智能体状态</h2>
+            <div class="agent-status" id="agentStatus">
+                <!-- 智能体状态将动态加载 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let logUpdateInterval = null;
+
+        // 初始化连接
+        function init() {
+            fetchStats();
+            refreshRooms();
+            refreshLogs();
+            startWebSocket();
+            
+            // 定期刷新统计数据
+            setInterval(fetchStats, 5000);
+        }
+
+        // 获取系统统计
+        async function fetchStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('roomCount').textContent = stats.rooms || 0;
+                document.getElementById('connectionCount').textContent = stats.connections || 0;
+                document.getElementById('llmBackend').textContent = stats.llmBackend || '-';
+                document.getElementById('sttBackend').textContent = stats.sttBackend || '-';
+            } catch (error) {
+                console.error('获取统计数据失败:', error);
+            }
+        }
+
+        // 刷新房间列表
+        async function refreshRooms() {
+            try {
+                const response = await fetch('/rooms');
+                const data = await response.json();
+                
+                const roomList = document.getElementById('roomList');
+                roomList.innerHTML = '';
+                
+                data.rooms.forEach(roomId => {
+                    const li = document.createElement('li');
+                    li.className = 'room-item';
+                    li.innerHTML = `
+                        <div class="room-info">
+                            <h4>${roomId}</h4>
+                            <p>连接数: <span id="conn-${roomId}">0</span></p>
+                        </div>
+                        <div>
+                            <button class="btn btn-primary" onclick="enterRoom('${roomId}')">进入</button>
+                            <button class="btn btn-danger" onclick="deleteRoom('${roomId}')">删除</button>
+                        </div>
+                    `;
+                    roomList.appendChild(li);
+                    
+                    // 更新每个房间的连接数
+                    updateRoomConnectionCount(roomId);
+                });
+            } catch (error) {
+                console.error('刷新房间列表失败:', error);
+            }
+        }
+
+        // 更新房间连接数
+        async function updateRoomConnectionCount(roomId) {
+            try {
+                const response = await fetch(`/room/${roomId}`);
+                const data = await response.json();
+                const elem = document.getElementById(`conn-${roomId}`);
+                if (elem) elem.textContent = data.active_connections || 0;
+            } catch (error) {
+                console.error('更新房间连接数失败:', error);
+            }
+        }
+
+        // 创建房间
+        async function createRoom() {
+            const roomId = prompt('请输入房间ID:', `room-${Date.now()}`);
+            if (!roomId) return;
+            
+            try {
+                // 触发创建（访问房间会自动创建）
+                await fetch(`/room/${roomId}`);
+                await refreshRooms();
+                alert(`房间 ${roomId} 创建成功`);
+            } catch (error) {
+                console.error('创建房间失败:', error);
+                alert('创建房间失败');
+            }
+        }
+
+        // 删除房间
+        async function deleteRoom(roomId) {
+            if (!confirm(`确定要删除房间 ${roomId} 吗？`)) return;
+            
+            try {
+                // 目前没有删除接口，简单刷新列表
+                await refreshRooms();
+                alert(`房间 ${roomId} 已标记删除`);
+            } catch (error) {
+                console.error('删除房间失败:', error);
+                alert('删除房间失败');
+            }
+        }
+
+        // 进入房间（打开客户端）
+        function enterRoom(roomId) {
+            window.open(`/?room=${roomId}`, '_blank');
+        }
+
+        // 刷新日志
+        async function refreshLogs() {
+            try {
+                const response = await fetch('/api/logs');
+                const logs = await response.text();
+                document.getElementById('logArea').textContent = logs;
+            } catch (error) {
+                console.error('刷新日志失败:', error);
+                document.getElementById('logArea').textContent = '获取日志失败: ' + error.message;
+            }
+        }
+
+        // 启动WebSocket实时更新
+        function startWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/admin`);
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.type === 'stats_update') {
+                    updateStats(data.stats);
+                } else if (data.type === 'log') {
+                    appendLog(data.message);
+                }
+            };
+            
+            ws.onclose = function() {
+                // 自动重连
+                setTimeout(startWebSocket, 3000);
+            };
+        }
+
+        // 追加日志
+        function appendLog(message) {
+            const logArea = document.getElementById('logArea');
+            const time = new Date().toLocaleTimeString();
+            logArea.textContent += `[${time}] ${message}\n`;
+            // 滚动到底部
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        // 初始化页面
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

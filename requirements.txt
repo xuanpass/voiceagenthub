@@ -1,0 +1,14 @@
+fastapi==0.104.1
+uvicorn==0.24.0.post1
+python-dotenv==1.0.0
+httpx==0.25.2
+aiofiles==23.2.1
+faster-whisper==0.10.0
+edge-tts==6.1.9
+miniaudio==1.210
+numpy==1.26.2
+pipecat-ai==1.11.0
+silero-vad==1.0.0
+websockets==11.0.3
+prometheus-client==0.19.0
+pyyaml==6.0.1

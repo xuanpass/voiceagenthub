@@ -1,0 +1,191 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceHub 语音助手</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        .header { text-align: center; margin-bottom: 2rem; }
+        .status-bar { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: center; }
+        .status { padding: 0.5rem 1rem; border-radius: 0.25rem; background: #f0f0f0; }
+        .status.active { background: #22c55e; color: white; }
+        .status.interrupted { background: #ef4444; color: white; }
+        .waveform-container { height: 150px; border: 1px solid #e5e7eb; border-radius: 0.5rem; margin-bottom: 1rem; position: relative; overflow: hidden; }
+        #waveform { width: 100%; height: 100%; }
+        .controls { display: flex; gap: 1rem; justify-content: center; margin-bottom: 1rem; }
+        button { padding: 0.75rem 1.5rem; border: none; border-radius: 0.5rem; background: #3b82f6; color: white; cursor: pointer; font-size: 1rem; }
+        button:disabled { background: #94a3b8; cursor: not-allowed; }
+        .log-area { height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 0.5rem; padding: 1rem; background: #f8fafc; font-family: monospace; font-size: 0.875rem; }
+        .interrupt-overlay { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 3rem; font-weight: bold; color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+        .interrupt-overlay.active { opacity: 0.8; }
+    </style></head><body>
+    <div class="header">
+        <h1>🎤 VoiceHub 语音助手</h1>
+        <p>实时语音交互，支持打断</p>
+    </div>
+    <div class="status-bar">
+        <div class="status" id="connection-status">未连接</div>
+        <div class="status" id="speech-status">未说话</div>
+        <div class="status" id="agent-status">等待指令</div>
+    </div>
+    <div class="waveform-container">
+        <canvas id="waveform"></canvas>
+        <div class="interrupt-overlay" id="interrupt-overlay">🔇 已打断</div>
+    </div>
+    <div class="controls">
+        <button id="start-btn">🎙️ 开始通话</button>
+        <button id="stop-btn" disabled>🔴 结束通话</button>
+    </div>
+    <div class="log-area" id="log-area"></div>
+    <script>
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const connectionStatus = document.getElementById('connection-status');
+        const speechStatus = document.getElementById('speech-status');
+        const agentStatus = document.getElementById('agent-status');
+        const interruptOverlay = document.getElementById('interrupt-overlay');
+        const logArea = document.getElementById('log-area');
+        const waveformCanvas = document.getElementById('waveform');
+        const waveformCtx = waveformCanvas.getContext('2d');
+        let ws = null;
+        let audioContext = null;
+        let scriptProcessor = null;
+        let audioSource = null;
+        let stream = null;
+        const sampleRate = 16000;
+        const bufferSize = 4096;
+        let waveformData = new Array(100).fill(0);
+        function addLog(message) {
+            const time = new Date().toLocaleTimeString();
+            logArea.innerHTML += `[${time}] ${message}\n`;
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        function drawWaveform() {
+            waveformCtx.clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+            const barWidth = waveformCanvas.width / waveformData.length;
+            const centerY = waveformCanvas.height / 2;
+            for (let i = 0; i < waveformData.length; i++) {
+                const value = waveformData[i];
+                const barHeight = Math.abs(value * centerY);
+                const x = i * barWidth;
+                const y = centerY - barHeight / 2;
+                waveformCtx.fillStyle = value > 0 ? '#3b82f6' : '#ef4444';
+                waveformCtx.fillRect(x, y, barWidth - 1, barHeight);
+            }
+        }
+        function updateWaveform(audioBuffer) {
+            const bufferLength = audioBuffer.length;
+            let sum = 0;
+            for (let i = 0; i < bufferLength; i++) {
+                sum += Math.abs(audioBuffer[i]);
+            }
+            const avg = sum / bufferLength;
+            waveformData.shift();
+            waveformData.push(avg);
+            drawWaveform();
+        }
+        async function startStream() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new AudioContext({ sampleRate: sampleRate });
+                audioSource = audioContext.createMediaStreamSource(stream);
+                scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                audioSource.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+                scriptProcessor.onaudioprocess = (event) => {
+                    const inputBuffer = event.inputBuffer;
+                    const channelData = inputBuffer.getChannelData(0);
+                    updateWaveform(channelData);
+                    const int16Data = new Int16Array(channelData.length);
+                    for (let i = 0; i < channelData.length; i++) {
+                        int16Data[i] = Math.max(-1, Math.min(1, channelData[i])) * 32767;
+                    }
+                    const base64Data = btoa(String.fromCharCode.apply(null, new Uint8Array(int16Data.buffer)));
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'audio', data: base64Data }));
+                    }
+                };
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                connectionStatus.className = 'status active';
+                connectionStatus.textContent = '已连接';
+                addLog('已连接到语音服务');
+            } catch (err) {
+                addLog(`麦克风授权失败: ${err.message}`);
+            }
+        }
+        function stopStream() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            if (audioSource) {
+                audioSource.disconnect();
+                audioSource = null;
+            }
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            connectionStatus.className = 'status';
+            connectionStatus.textContent = '未连接';
+            addLog('已断开语音服务');
+        }
+        startBtn.addEventListener('click', async () => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => {
+                startStream();
+            };
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                switch (data.type) {
+                    case 'transcript':
+                        speechStatus.textContent = data.is_partial ? '识别中...' : '已识别';
+                        agentStatus.textContent = `收到: ${data.text}`;
+                        if (data.is_partial) {
+                            addLog(`[Partial] ${data.text}`);
+                        } else {
+                            addLog(`[Final] ${data.text}`);
+                        }
+                        break;
+                    case 'interrupt':
+                        interruptOverlay.classList.add('active');
+                        setTimeout(() => interruptOverlay.classList.remove('active'), 1000);
+                        addLog('🔇 用户打断了当前回答');
+                        break;
+                    case 'error':
+                        addLog(`错误: ${data.message}`);
+                        break;
+                }
+            };
+            ws.onerror = (error) => {
+                addLog(`WebSocket错误: ${error.message}`);
+            };
+            ws.onclose = () => {
+                stopStream();
+                ws = null;
+            };
+        });
+        stopBtn.addEventListener('click', () => {
+            if (ws) {
+                ws.close();
+            } else {
+                stopStream();
+            }
+        });
+        window.addEventListener('resize', () => {
+            waveformCanvas.width = waveformContainer.clientWidth;
+            waveformCanvas.height = waveformContainer.clientHeight;
+            drawWaveform();
+        });
+        window.dispatchEvent(new Event('resize'));
+    </script></body></html>

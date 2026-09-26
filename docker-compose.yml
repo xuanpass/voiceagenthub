@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  voicehub:
+    build: .
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./.env:/app/.env
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - VOICEHUB_SSL_KEY=${VOICEHUB_SSL_KEY}
+      - VOICEHUB_SSL_CERT=${VOICEHUB_SSL_CERT}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 可选：Prometheus监控（如需完整监控栈）
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    depends_on:
+      - voicehub
+
+volumes:
+  prometheus_data:

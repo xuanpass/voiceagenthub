@@ -1,0 +1,39 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs and data
+logs/
+data/
+*.log
+*.log.*
+
+# Environment and configuration files
+.env
+.env.*
+! .env.example
+config.yaml
+! config.yaml.example
+
+# Docker
+docker-compose.override.yml
+*.dockerfile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
