@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import numpy as np
 from faster_whisper import WhisperModel
-from pipecat.frames.frames import TranscriptionFrame, RawAudioFrame, VoiceActivityFrame
+from pipecat.frames.frames import TranscriptionFrame, InputAudioRawFrame, VADUserStoppedSpeakingFrame
 from pipecat.processors.frame_processor import FrameProcessor
 from .base import STTBackend
 

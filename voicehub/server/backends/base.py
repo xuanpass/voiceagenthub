@@ -1,6 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, Optional
+from dataclasses import dataclass
 import asyncio
+
+
+@dataclass
+class Message:
+    role: str  # "user" | "assistant" | "system"
+    content: str
 
 
 class LLMBackend(ABC):
@@ -29,6 +36,10 @@ class LLMBackend(ABC):
     async def abort(self) -> None:
         """终止当前正在处理的请求"""
         pass
+
+
+# Alias for backward compatibility
+AgentBackend = LLMBackend
 
 
 class STTBackend(ABC):
