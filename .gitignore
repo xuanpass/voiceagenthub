@@ -46,8 +46,9 @@ temp/
 *.png
 *.json
 *.py
-! voicehub/
-! server/
+# 核心代码目录全部纳入版本控制
+!voicehub/**
+!server/**
 ! requirements.txt
 ! start.sh
 ! Dockerfile

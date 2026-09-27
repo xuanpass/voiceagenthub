@@ -58,6 +58,8 @@ from .room_manager import RoomManager
 from .orchestrator import Orchestrator
 from .router import Router
 from .tts import TTSEngine, TTS_CHANNELS, TTS_SAMPLE_RATE, split_sentences
+from .gate import GateProcessor, RuleEngine, GateLogger, LLMReviewer
+from .gate.optimizer import RuleOptimizer, RuleSuggestion
 
 logger = logging.getLogger("voicehub")
 
@@ -185,6 +187,27 @@ def _build_stack():
 
 _CONFIG, _BACKEND_MANAGER, _ROOM_MANAGER, _STT, _SRV = _build_stack()
 
+# --- Gate: shared server-wide rule engine + decision logger ---
+_RULE_ENGINE = RuleEngine()
+_GATE_LOGGER = GateLogger()
+_GATE_REVIEWER: Optional[LLMReviewer] = None  # set on startup when backends are warm
+
+
+def _init_gate_reviewer() -> None:
+    """Pick a cheap backend for LLM gate review (prefer hermes/openai-compat).
+
+    Review needs a plain OpenAI-compatible endpoint; the openclaw CLI adapter
+    spawns a subprocess per call which is too slow for gating.
+    """
+    global _GATE_REVIEWER
+    backends = _BACKEND_MANAGER.llm_backends
+    for key in ("openai", "hermes", "cherrystudio"):
+        if key in backends:
+            _GATE_REVIEWER = LLMReviewer(backends[key])
+            logger.info("[Gate] LLM reviewer using backend: %s", key)
+            return
+    logger.warning("[Gate] no LLM backend available for review; rules-only mode")
+
 
 async def _warmup_backends() -> None:
     """Warm up LLM models on startup so the first real user turn is fast.
@@ -237,13 +260,21 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
     # Override active agent for this connection
     router_proc.active = active_agent
     
+    # Gate: rule pre-filter + LLM review, between STT and Router
+    gate_proc = GateProcessor(
+        rule_engine=_RULE_ENGINE,
+        gate_logger=_GATE_LOGGER,
+        reviewer=_GATE_REVIEWER,
+        conv_id=conv_id,
+    )
+    
     params = TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
         vad_analyzer=SileroVADAnalyzer(),
     )
     transport = SmallWebRTCTransport(webrtc_connection, params)
-    pipeline = Pipeline([transport.input(), stt, router_proc, transport.output()])
+    pipeline = Pipeline([transport.input(), stt, gate_proc, router_proc, transport.output()])
     task = PipelineTask(pipeline)
     
     try:
@@ -383,6 +414,65 @@ async def admin_websocket(websocket: WebSocket):
             log_websockets.remove(websocket)
 
 
+@app.get("/api/gate/stats")
+async def gate_stats():
+    """Gate decision statistics (recent window)."""
+    return JSONResponse({
+        "rules": _RULE_ENGINE.get_stats(),
+        "decisions": await _GATE_LOGGER.get_stats(),
+        "reviewer": "llm" if _GATE_REVIEWER else "rules-only",
+    })
+
+
+@app.get("/api/gate/rules")
+async def gate_rules():
+    """List current gate rules."""
+    return JSONResponse([
+        {"name": r.name, "verdict": r.verdict, "priority": r.priority,
+         "pattern": r.pattern, "enabled": r.enabled, "description": r.description}
+        for r in _RULE_ENGINE.rules
+    ])
+
+
+@app.post("/api/gate/optimize")
+async def gate_optimize(days: int = 1):
+    """Run rule self-evolution analysis. Returns suggestions; does NOT apply.
+    
+    Apply a suggestion via /api/gate/apply after review."""
+    opt = RuleOptimizer(_RULE_ENGINE, _GATE_LOGGER, llm=_GATE_REVIEWER._backend if _GATE_REVIEWER else None)
+    report = await opt.analyze_and_propose(days=days)
+    return JSONResponse({
+        "analyzed_records": report.analyzed_records,
+        "wrong_ignores": report.wrong_ignores,
+        "wrong_passes": report.wrong_passes,
+        "suggestions": [
+            {"action": s.action, "rule": {"name": s.rule.name, "pattern": s.rule.pattern,
+                                           "verdict": s.rule.verdict, "priority": s.rule.priority} if s.rule else None,
+             "reason": s.reason, "confidence": s.confidence, "backtest": s.backtest}
+            for s in report.suggestions
+        ],
+    })
+
+
+@app.post("/api/gate/apply")
+async def gate_apply(request: Request):
+    """Apply one suggestion (after human review). Body: the suggestion JSON
+    returned by /api/gate/optimize."""
+    body = await request.json()
+    from .gate.rules import Rule
+    rule = None
+    if body.get("rule"):
+        rule = Rule(**body["rule"])
+    sug = RuleSuggestion(
+        action=body["action"], rule=rule,
+        target_rule_name=body.get("target_rule_name"),
+        reason=body.get("reason", ""),
+    )
+    opt = RuleOptimizer(_RULE_ENGINE, _GATE_LOGGER)
+    ok = await opt.apply_suggestion(sug)
+    return JSONResponse({"applied": ok, "rule_version": _RULE_ENGINE.version})
+
+
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint"""
@@ -468,6 +558,16 @@ async def offer(request: Request):
     return JSONResponse(answer)
 
 
+# Startup hooks must be registered at module level: run.py imports this
+# module (uvicorn.run("server.main:app")), so __main__-only hooks never fire.
+@app.on_event("startup")
+async def _on_startup():
+    asyncio.create_task(_warmup_backends())
+    asyncio.create_task(_cleanup_zombie_tasks())
+    _init_gate_reviewer()
+    await _GATE_LOGGER.start()
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -479,13 +579,6 @@ if __name__ == "__main__":
         print(f"[VoiceHub] HTTPS on :{_SRV.get('port', 8765)} (cert={cert})")
     else:
         print(f"[VoiceHub] HTTP on :{_SRV.get('port', 8765)} (set VOICEHUB_SSL_* for HTTPS)")
-    # Schedule LLM warmup in a background task so the first user turn is fast.
-    # uvicorn runs the event loop; create the task inside an on-startup hook
-    # so it shares the loop the server actually runs on.
-    @app.on_event("startup")
-    async def _on_startup_warmup():
-        asyncio.create_task(_warmup_backends())
-        asyncio.create_task(_cleanup_zombie_tasks())
 
 
 # 僵尸任务清理后台任务

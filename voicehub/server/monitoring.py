@@ -80,8 +80,8 @@ class SystemMonitor:
             
             # 更新请求耗时指标
             REQUEST_DURATION.labels(
-                endpoint=endpoint,
-                method=method,
+                endpoint='unknown',
+                method='unknown',
                 status_code=str(status_code)
             ).observe(duration)
             
