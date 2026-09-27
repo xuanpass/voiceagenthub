@@ -13,7 +13,8 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 from pathlib import Path
 
-_LOG_DIR = Path(os.environ.get("GATE_LOG_DIR", "/home/wangxuan/voicehub/logs/gate"))
+def _get_log_dir():
+    return Path(os.environ.get("GATE_LOG_DIR", "/home/wangxuan/voicehub/logs/gate"))
 
 
 @dataclass
@@ -40,7 +41,7 @@ class GateLogger:
         self._lock = asyncio.Lock()
         self._flush_task: Optional[asyncio.Task] = None
         self._recent: list[GateRecord] = []  # last N records for stats/followup
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _get_log_dir().mkdir(parents=True, exist_ok=True)
 
     async def start(self) -> None:
         if self._flush_task is None:
@@ -90,7 +91,7 @@ class GateLogger:
         records = self._buffer[:]
         self._buffer.clear()
         date_str = time.strftime("%Y-%m-%d")
-        log_file = _LOG_DIR / f"gate_{date_str}.jsonl"
+        log_file = _get_log_dir() / f"gate_{date_str}.jsonl"
         lines = "\n".join(json.dumps(asdict(r), ensure_ascii=False) for r in records)
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._append_to_file, log_file, lines)
@@ -120,7 +121,7 @@ class GateLogger:
         now = time.time()
         for d in range(days):
             day = time.localtime(now - d * 86400)
-            f = _LOG_DIR / f"gate_{time.strftime('%Y-%m-%d', day)}.jsonl"
+            f = _get_log_dir() / f"gate_{time.strftime('%Y-%m-%d', day)}.jsonl"
             if not f.exists():
                 continue
             for line in f.read_text(encoding="utf-8").splitlines():
