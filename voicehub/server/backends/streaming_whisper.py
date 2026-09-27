@@ -24,26 +24,24 @@ class StreamingWhisperSTTService(STTBackend, FrameProcessor):
 
     async def process_frame(self, frame, direction: FrameDirection):
         # 1. 处理音频帧，累积缓冲并实时推理
-        if isinstance(frame, RawAudioFrame):
+        if isinstance(frame, InputAudioRawFrame):
             self._audio_buffer += frame.audio
-            # 每100ms处理一次音频（平衡延迟和准确率）
-            buffer_duration = len(self._audio_buffer) / (2 * self._sample_rate)
-            # 调整缓冲时长为150ms，平衡延迟和识别准确率
+            # 每150ms处理一次音频（平衡延迟和准确率）
+            buffer_duration = len(self._audio_buffer) / (2 * frame.sample_rate)
             if buffer_duration >= 0.15:
                 audio = np.frombuffer(self._audio_buffer, dtype=np.int16).astype(np.float32) / 32768.0
                 segments, _ = self._model.transcribe_stream(audio, stream=True)
                 current_partial = "".join([seg.text for seg in segments])
-                # 发出partial转录帧
                 if current_partial and current_partial != self._last_partial_text:
-                    partial_frame = TranscriptionFrame(current_partial, "", frame.timestamp)
+                    partial_frame = TranscriptionFrame(current_partial, "", str(frame.pts or 0))
                     setattr(partial_frame, "is_partial", True)
                     await self.push_frame(partial_frame)
                     self._last_partial_text = current_partial
                 self._audio_buffer = b""
         # 2. 处理VAD结束帧，发出final转录
-        elif isinstance(frame, VoiceActivityFrame) and not frame.is_speech:
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
             if self._last_partial_text:
-                final_frame = TranscriptionFrame(self._last_partial_text, "", frame.timestamp)
+                final_frame = TranscriptionFrame(self._last_partial_text, "", str(frame.pts or 0))
                 setattr(final_frame, "is_partial", False)
                 await self.push_frame(final_frame)
                 self._last_partial_text = ""
