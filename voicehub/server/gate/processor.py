@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 import logging
 
-from pipecat.frames.frames import TranscriptionFrame
+from pipecat.frames.frames import TranscriptionFrame, InterimTranscriptionFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from .rules import RuleEngine
@@ -48,17 +48,16 @@ class GateProcessor(FrameProcessor):
         self.optimizer = RuleOptimizer(rule_engine, gate_logger)
 
     async def process_frame(self, frame, direction: FrameDirection):
-        if isinstance(frame, TranscriptionFrame):
+        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
             text = frame.text.strip()
             if not text:
                 return
-            is_partial = hasattr(frame, "is_partial") and frame.is_partial
-            if is_partial:
-                # partials: forward untouched for live captions
+            # Partial frames: forward untouched for live captions.
+            # In pipecat 1.12, InterimTranscriptionFrame is partial by nature;
+            # TranscriptionFrame may also carry is_partial=True from some STT services.
+            if isinstance(frame, InterimTranscriptionFrame) or (hasattr(frame, "is_partial") and frame.is_partial):
                 await self.push_frame(frame, direction)
                 return
-
-            # --- final transcription: gate it ---
             result = self.rule_engine.evaluate(text)
             record = GateRecord(
                 timestamp=time.time(),

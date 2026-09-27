@@ -50,7 +50,8 @@ class GateLogger:
         if self._flush_task:
             self._flush_task.cancel()
             self._flush_task = None
-        await self._flush()
+        async with self._lock:
+            await self._do_flush()
 
     async def log(self, record: GateRecord) -> None:
         async with self._lock:
@@ -59,7 +60,7 @@ class GateLogger:
             if len(self._recent) > 200:
                 del self._recent[: len(self._recent) - 200]
             if len(self._buffer) >= self._buffer_size:
-                await self._flush_unlocked()
+                await self._do_flush()
 
     async def patch_followup(self, conv_id: str, text_hint: str) -> bool:
         """Mark the most recent ignore-decision in this conversation as wrong
@@ -76,13 +77,14 @@ class GateLogger:
         while True:
             await asyncio.sleep(self._flush_interval)
             async with self._lock:
-                await self._flush_unlocked()
+                await self._do_flush()
 
-    async def _flush(self) -> None:
+    async def flush(self) -> None:
+        """Flush the buffer (public for testing)."""
         async with self._lock:
-            await self._flush_unlocked()
+            await self._do_flush()
 
-    async def _flush_unlocked(self) -> None:
+    async def _do_flush(self) -> None:
         if not self._buffer:
             return
         records = self._buffer[:]
