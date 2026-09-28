@@ -43,10 +43,13 @@ class BackendManager:
     
     def _init_llm_backends(self) -> None:
         """初始化LLM后端"""
-        # OpenAI兼容后端
+        # OpenAI兼容后端（本机部署实际指向 Hermes OpenAI Bridge :8642，需要 API_SERVER_KEY）
         openai_endpoint = os.getenv("OPENAI_API_BASE", "http://localhost:8642/v1/chat/completions")
-        openai_api_key = os.getenv("OPENAI_API_KEY", "sk-123456")
-        openai_model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+        # api_key 优先 OPENAI_API_KEY，其次 HERMES_KEY（Hermes gateway 的 API_SERVER_KEY）；
+        # 二者皆缺时回落占位值，会触发 401 以便尽早暴露配置缺失。
+        # model 默认 auto（Hermes 按 auto 路由），不要用 gpt-3.5-turbo（Hermes 会拒）。
+        openai_api_key = os.getenv("OPENAI_API_KEY", os.getenv("HERMES_KEY", "sk-123456"))
+        openai_model = os.getenv("OPENAI_MODEL", "auto")
         
         self.llm_backends["openai"] = OpenAICompatBackend(
             name="openai",
