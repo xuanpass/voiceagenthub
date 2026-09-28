@@ -30,6 +30,9 @@ class _FakeStream:
         for ln in self._lines:
             yield ln
 
+    async def aclose(self):
+        pass
+
 
 class _FakeStreamCM:
     def __init__(self, lines):

@@ -163,6 +163,75 @@
         .agent-badge.offline {
             background: #95a5a6;
         }
+
+        /* === Gate 门控面板 === */
+        .gate-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .gate-stat {
+            background: #f8fafc;
+            border: 1px solid #ecf0f1;
+            border-radius: 6px;
+            padding: 12px 8px;
+            text-align: center;
+        }
+        .gate-stat .gs-val {
+            display: block;
+            font-size: 22px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .gate-stat .gs-lbl {
+            font-size: 12px;
+            color: #7f8c8d;
+        }
+        .gate-stat.warn .gs-val { color: #e67e22; }
+
+        .rule-item {
+            padding: 12px 14px;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            background: #fafbfc;
+        }
+        .rule-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .rule-name { font-weight: bold; color: #2c3e50; }
+        .rule-prio { margin-left: auto; font-size: 12px; color: #95a5a6; }
+        .rule-pattern { margin: 6px 0; }
+        .rule-pattern code, .sug-pattern code {
+            background: #2c3e50; color: #ecf0f1; padding: 2px 6px;
+            border-radius: 3px; font-size: 11px; word-break: break-all;
+        }
+        .rule-desc { font-size: 12px; color: #7f8c8d; }
+        .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #fff; }
+        .badge-block { background: #e74c3c; }
+        .badge-pass { background: #27ae60; }
+        .badge-on { background: #27ae60; color:#fff; padding:2px 6px; border-radius:8px; font-size:11px;}
+        .badge-off { background: #95a5a6; color:#fff; padding:2px 6px; border-radius:8px; font-size:11px;}
+
+        .gate-opt-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+        .gate-opt-toolbar input {
+            width: 70px; padding: 6px; border: 1px solid #ccc; border-radius: 4px;
+        }
+        .opt-summary { font-size: 14px; color: #2c3e50; margin-bottom: 10px; }
+        .opt-status { color: #7f8c8d; padding: 10px 0; }
+        .opt-status.err { color: #e74c3c; }
+        .opt-empty { color: #e67e22; padding: 8px 0; }
+        .sug-card {
+            border: 1px solid #d6eaf8; background: #f4f9ff; border-radius: 6px;
+            padding: 12px 14px; margin-bottom: 10px;
+        }
+        .sug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .sug-action { padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #fff; font-weight: bold; }
+        .sug-add { background: #2980b9; }
+        .sug-remove { background: #c0392b; }
+        .sug-modify { background: #8e44ad; }
+        .sug-reason { font-size: 13px; color: #34495e; }
+        .sug-rule { font-size: 13px; color: #2c3e50; margin: 4px 0; }
+        .sug-meta { font-size: 12px; color: #7f8c8d; margin: 6px 0; }
     </style>
 </head>
 <body>
@@ -213,6 +282,27 @@
                 <!-- 智能体状态将动态加载 -->
             </div>
         </div>
+
+        <div class="section">
+            <h2>🚪 Gate 应答门控</h2>
+            <div class="gate-stat-grid" id="gateStats">等待门控统计…</div>
+            <button class="btn btn-primary" onclick="fetchGateStats();fetchGateRules()">刷新门控数据</button>
+        </div>
+
+        <div class="section">
+            <h2>📐 门控规则</h2>
+            <div id="gateRules">等待规则加载…</div>
+        </div>
+
+        <div class="section">
+            <h2>🧠 规则自进化（LLM 挖掘）</h2>
+            <div class="gate-opt-toolbar">
+                <label>回溯天数：</label>
+                <input type="number" id="gateDays" value="1" min="1" max="30" />
+                <button class="btn btn-primary" onclick="runGateOptimize()">运行优化分析</button>
+            </div>
+            <div id="gateOptimizeResult"><span class="opt-status">点击「运行优化分析」基于门控日志挖掘新规则（需先有决策日志）。</span></div>
+        </div>
     </div>
 
     <script>
@@ -228,6 +318,11 @@
             
             // 定期刷新统计数据
             setInterval(fetchStats, 5000);
+
+            // Gate 门控面板
+            fetchGateStats();
+            fetchGateRules();
+            setInterval(fetchGateStats, 10000);
         }
 
         // 获取系统统计
@@ -363,6 +458,146 @@
             logArea.textContent += `[${time}] ${message}\n`;
             // 滚动到底部
             logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        /* ===== Gate 门控面板逻辑 ===== */
+        async function fetchGateStats() {
+            try {
+                const res = await fetch('/api/gate/stats');
+                const data = await res.json();
+                renderGateStats(data);
+            } catch (e) {
+                console.error('获取门控统计失败:', e);
+            }
+        }
+
+        function renderGateStats(data) {
+            const r = data.rules || {};
+            const d = data.decisions || {};
+            const reviewer = data.reviewer || '-';
+            const blockRate = ((d.block_rate || 0) * 100).toFixed(1);
+            document.getElementById('gateStats').innerHTML = `
+                <div class="gate-stat"><span class="gs-val">${r.total_rules ?? 0}</span><span class="gs-lbl">规则总数</span></div>
+                <div class="gate-stat"><span class="gs-val">${r.block_rules ?? 0}</span><span class="gs-lbl">拦截规则</span></div>
+                <div class="gate-stat"><span class="gs-val">${r.pass_rules ?? 0}</span><span class="gs-lbl">放行规则</span></div>
+                <div class="gate-stat"><span class="gs-val">v${r.version ?? 0}</span><span class="gs-lbl">规则版本</span></div>
+                <div class="gate-stat"><span class="gs-val">${d.recent_total ?? 0}</span><span class="gs-lbl">近期决策</span></div>
+                <div class="gate-stat"><span class="gs-val">${d.ignored ?? 0}</span><span class="gs-lbl">被拦截</span></div>
+                <div class="gate-stat"><span class="gs-val">${d.llm_reviewed ?? 0}</span><span class="gs-lbl">LLM复核</span></div>
+                <div class="gate-stat warn"><span class="gs-val">${d.wrong_ignores ?? 0}</span><span class="gs-lbl">误拦截</span></div>
+                <div class="gate-stat"><span class="gs-val">${blockRate}%</span><span class="gs-lbl">拦截率</span></div>
+                <div class="gate-stat"><span class="gs-val">${reviewer}</span><span class="gs-lbl">复核模式</span></div>
+            `;
+        }
+
+        async function fetchGateRules() {
+            try {
+                const res = await fetch('/api/gate/rules');
+                const rules = await res.json();
+                renderGateRules(rules);
+            } catch (e) {
+                console.error('获取门控规则失败:', e);
+                document.getElementById('gateRules').textContent = '获取规则失败: ' + e.message;
+            }
+        }
+
+        function renderGateRules(rules) {
+            const el = document.getElementById('gateRules');
+            el.innerHTML = '';
+            (rules || []).forEach(r => {
+                const verdict = r.verdict === 'block' ? '拦截' : '放行';
+                const vclass = r.verdict === 'block' ? 'badge-block' : 'badge-pass';
+                const en = r.enabled ? '<span class="badge-on">启用</span>' : '<span class="badge-off">停用</span>';
+                const div = document.createElement('div');
+                div.className = 'rule-item';
+                div.innerHTML = `
+                    <div class="rule-head">
+                        <span class="rule-name">${escapeHtml(r.name)}</span>
+                        <span class="badge ${vclass}">${verdict}</span>
+                        ${en}
+                        <span class="rule-prio">优先级 ${r.priority}</span>
+                    </div>
+                    <div class="rule-pattern"><code>${escapeHtml(r.pattern)}</code></div>
+                    <div class="rule-desc">${escapeHtml(r.description || '')}</div>
+                `;
+                el.appendChild(div);
+            });
+        }
+
+        async function runGateOptimize() {
+            const days = document.getElementById('gateDays').value || 1;
+            const out = document.getElementById('gateOptimizeResult');
+            out.innerHTML = '<div class="opt-status">⏳ 正在分析门控日志并挖掘规则…</div>';
+            try {
+                const res = await fetch('/api/gate/optimize?days=' + encodeURIComponent(days), {method:'POST'});
+                const data = await res.json();
+                renderGateOptimize(data);
+            } catch (e) {
+                out.innerHTML = '<div class="opt-status err">优化请求失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderGateOptimize(data) {
+            const out = document.getElementById('gateOptimizeResult');
+            const n = data.analyzed_records ?? 0;
+            let html = '<div class="opt-summary">分析记录 <b>' + n + '</b> 条 · 误拦截 <b>' + (data.wrong_ignores ?? 0) + '</b> · 误放行 <b>' + (data.wrong_passes ?? 0) + '</b></div>';
+            const sugs = data.suggestions || [];
+            if (!sugs.length) {
+                html += (n === 0)
+                    ? '<div class="opt-empty">⚠️ 暂无门控决策日志，无法挖掘规则。请先通过真实语音交互积累日志（GATE_LOG_DIR 下 gate_YYYY-MM-DD.jsonl）。</div>'
+                    : '<div class="opt-empty">✅ 未检测到明显错误模式，当前规则已较优。</div>';
+            } else {
+                sugs.forEach((s, i) => {
+                    const rule = s.rule || {};
+                    const bt = s.backtest || {};
+                    const fixRate = bt.fix_rate != null ? (bt.fix_rate * 100).toFixed(0) + '%' : '-';
+                    const ruleBlock = rule.name ? (
+                        '<div class="sug-rule">规则 <code>' + escapeHtml(rule.name) + '</code> · ' + escapeHtml(rule.verdict) + ' · 优先级 ' + escapeHtml(rule.priority) + '</div>' +
+                        '<div class="sug-pattern"><code>' + escapeHtml(rule.pattern) + '</code></div>'
+                    ) : '';
+                    html += '<div class="sug-card">' +
+                        '<div class="sug-head"><span class="sug-action sug-' + escapeHtml(s.action) + '">' + escapeHtml(s.action) + '</span>' +
+                        '<span class="sug-reason">' + escapeHtml(s.reason) + '</span></div>' +
+                        ruleBlock +
+                        '<div class="sug-meta">置信度 ' + (s.confidence * 100).toFixed(0) + '% · 回测可修复 ' + (bt.would_fix ?? 0) + '/' + (bt.targets ?? 0) + ' (' + fixRate + ')</div>' +
+                        '<button class="btn btn-primary" onclick="applyGateSuggestion(' + i + ')">应用此规则</button>' +
+                        '</div>';
+                });
+            }
+            out.innerHTML = html;
+            window._gateSuggestions = sugs;
+        }
+
+        async function applyGateSuggestion(i) {
+            const sugs = window._gateSuggestions || [];
+            const s = sugs[i];
+            if (!s) return;
+            const body = {
+                action: s.action,
+                rule: s.rule || null,
+                target_rule_name: s.target_rule_name || null,
+                reason: s.reason || ''
+            };
+            if (!confirm('确认将以下规则变更应用到运行中的引擎？\n' + s.action + ' : ' + (s.rule ? s.rule.name : s.target_rule_name))) return;
+            try {
+                const res = await fetch('/api/gate/apply', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                alert(data.applied ? ('✅ 规则已应用（规则版本 v' + data.rule_version + '）') : '⚠️ 应用失败或被拒绝');
+                await fetchGateRules();
+                await fetchGateStats();
+            } catch (e) {
+                alert('应用失败: ' + e.message);
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str == null ? '' : String(str);
+            return div.innerHTML;
         }
 
         // 初始化页面

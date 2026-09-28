@@ -101,7 +101,10 @@ class RuleOptimizer:
             reply = ""
             async for chunk in self._llm.send(text=prompt, session_id="gate-opt", abort=None):
                 reply += chunk
-            pattern = reply.strip().strip("`\"' \n")
+            pattern = self._extract_regex(reply)
+            if not pattern:
+                logger.warning("[Gate] LLM returned empty regex; using heuristic")
+                return self._heuristic_block_rule(texts)
             self._validate_regex(pattern)  # raises on bad pattern
         except Exception as e:
             logger.warning("[Gate] LLM rule mining failed: %s", e)
@@ -129,7 +132,10 @@ class RuleOptimizer:
             reply = ""
             async for chunk in self._llm.send(text=prompt, session_id="gate-opt", abort=None):
                 reply += chunk
-            pattern = reply.strip().strip("`\"' \n")
+            pattern = self._extract_regex(reply)
+            if not pattern:
+                logger.warning("[Gate] LLM returned empty regex for pass-rule; skipping")
+                return None
             self._validate_regex(pattern)
         except Exception as e:
             logger.warning("[Gate] LLM pass-rule mining failed: %s", e)
@@ -160,6 +166,23 @@ class RuleOptimizer:
     @staticmethod
     def _validate_regex(pattern: str) -> None:
         re.compile(pattern)  # raises re.error on invalid pattern
+
+    @staticmethod
+    def _extract_regex(reply: str) -> str:
+        """Pull a usable regex out of an LLM reply.
+
+        Handles markdown code fences and stray wrapping quotes/backticks.
+        Returns '' if nothing usable was found (caller must then fall back) —
+        an empty pattern compiles fine but matches EVERYTHING, which would
+        block/pass all utterances, so it must never become a rule.
+        """
+        reply = (reply or "").strip()
+        # strip a fenced code block if present (```...``` or ```python\n...```)
+        m = re.search(r"```(?:[A-Za-z0-9_+-]*)?\s*\n?(.*?)```", reply, re.DOTALL)
+        if m:
+            reply = m.group(1).strip()
+        # strip any remaining surrounding backticks / quotes / whitespace
+        return reply.strip("`\"' \n")
 
     @staticmethod
     def _backtest(rule: Rule, records: list[GateRecord], expect: str) -> dict:

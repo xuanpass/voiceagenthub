@@ -79,28 +79,32 @@ class OpenAICompatBackend(LLMBackend):
             headers[self.auth_header] = val
         payload = {"model": self.model, "messages": messages, "stream": True}
         reply_parts: list[str] = []
-        
-        # Store current response for abort
-        self._current_response = await self._client.stream("POST", self.endpoint, headers=headers, json=payload)
-        
+
+        # httpx.stream() returns an async context manager (NOT awaitable).
+        # Enter it to obtain the response, iterate SSE lines, and let __aexit__
+        # return the connection to the pool (or close it on hard-cancel).
         try:
-            async for line in self._current_response.aiter_lines():
-                if abort is not None and abort.is_set():
-                    break  # hard-cancel: drop stream, close this connection
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
-                if delta:
-                    reply_parts.append(delta)
-                    yield delta
+            async with self._client.stream(
+                "POST", self.endpoint, headers=headers, json=payload
+            ) as response:
+                self._current_response = response
+                async for line in response.aiter_lines():
+                    if abort is not None and abort.is_set():
+                        break  # hard-cancel: drop stream, __aexit__ closes conn
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                    if delta:
+                        reply_parts.append(delta)
+                        yield delta
         finally:
             # Clean up current response reference
             if hasattr(self, '_current_response'):
