@@ -30,7 +30,7 @@ class StreamingWhisperSTTService(STTBackend, FrameProcessor):
             buffer_duration = len(self._audio_buffer) / (2 * frame.sample_rate)
             if buffer_duration >= 0.15:
                 audio = np.frombuffer(self._audio_buffer, dtype=np.int16).astype(np.float32) / 32768.0
-                segments, _ = self._model.transcribe_stream(audio, stream=True)
+                segments, _ = self._model.transcribe(audio, condition_on_previous_text=False)
                 current_partial = "".join([seg.text for seg in segments])
                 if current_partial and current_partial != self._last_partial_text:
                     partial_frame = TranscriptionFrame(current_partial, "", str(frame.pts or 0))
@@ -81,5 +81,6 @@ class StreamingWhisperSTTService(STTBackend, FrameProcessor):
         self._last_partial_text = ""
 
     async def close(self):
-        """释放模型资源"""
-        del self._model
+        """释放模型资源（仅服务关闭时由 BackendManager.close_all 调用一次）"""
+        if hasattr(self, "_model"):
+            del self._model

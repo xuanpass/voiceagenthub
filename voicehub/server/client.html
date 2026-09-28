@@ -4,29 +4,38 @@
     <title>VoiceHub 语音助手</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; background: #0f172a; color: #e2e8f0; }
         .header { text-align: center; margin-bottom: 2rem; }
-        .status-bar { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: center; }
-        .status { padding: 0.5rem 1rem; border-radius: 0.25rem; background: #f0f0f0; }
-        .status.active { background: #22c55e; color: white; }
-        .status.interrupted { background: #ef4444; color: white; }
-        .waveform-container { height: 150px; border: 1px solid #e5e7eb; border-radius: 0.5rem; margin-bottom: 1rem; position: relative; overflow: hidden; }
+        .header h1 { font-size: 1.6rem; }
+        .header p { color: #94a3b8; margin-top: .4rem; }
+        .status-bar { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: center; flex-wrap: wrap; }
+        .status { padding: 0.5rem 1rem; border-radius: 0.25rem; background: #1e293b; font-size: .9rem; }
+        .status.active { background: #22c55e; color: #052e16; font-weight: 600; }
+        .status.connecting { background: #eab308; color: #422006; font-weight: 600; }
+        .status.interrupted { background: #ef4444; color: #450a0a; font-weight: 600; }
+        .waveform-container { height: 150px; border: 1px solid #334155; border-radius: 0.5rem; margin-bottom: 1rem; position: relative; overflow: hidden; background: #111827; }
         #waveform { width: 100%; height: 100%; }
         .controls { display: flex; gap: 1rem; justify-content: center; margin-bottom: 1rem; }
         button { padding: 0.75rem 1.5rem; border: none; border-radius: 0.5rem; background: #3b82f6; color: white; cursor: pointer; font-size: 1rem; }
-        button:disabled { background: #94a3b8; cursor: not-allowed; }
-        .log-area { height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 0.5rem; padding: 1rem; background: #f8fafc; font-family: monospace; font-size: 0.875rem; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+        .log-area { height: 220px; overflow-y: auto; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; background: #111827; font-family: monospace; font-size: 0.85rem; line-height: 1.5; }
+        .log-area .err { color: #f87171; }
+        .log-area .ok { color: #4ade80; }
+        .log-area .warn { color: #fbbf24; }
         .interrupt-overlay { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 3rem; font-weight: bold; color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
         .interrupt-overlay.active { opacity: 0.8; }
+        .notice { background: #7c2d12; color: #fed7aa; padding: .75rem 1rem; border-radius: .5rem; margin-bottom: 1rem; font-size: .9rem; line-height: 1.5; display: none; }
+        .notice.show { display: block; }
     </style></head><body>
     <div class="header">
         <h1>🎤 VoiceHub 语音助手</h1>
-        <p>实时语音交互，支持打断</p>
+        <p>实时语音交互（WebRTC），支持打断</p>
     </div>
+    <div id="secure-notice" class="notice"></div>
     <div class="status-bar">
         <div class="status" id="connection-status">未连接</div>
-        <div class="status" id="speech-status">未说话</div>
-        <div class="status" id="agent-status">等待指令</div>
+        <div class="status" id="speech-status">等待麦克风</div>
+        <div class="status" id="agent-status">点击开始通话</div>
     </div>
     <div class="waveform-container">
         <canvas id="waveform"></canvas>
@@ -37,6 +46,7 @@
         <button id="stop-btn" disabled>🔴 结束通话</button>
     </div>
     <div class="log-area" id="log-area"></div>
+    <audio id="remote-audio" autoplay></audio>
     <script>
         const startBtn = document.getElementById('start-btn');
         const stopBtn = document.getElementById('stop-btn');
@@ -47,17 +57,22 @@
         const logArea = document.getElementById('log-area');
         const waveformCanvas = document.getElementById('waveform');
         const waveformCtx = waveformCanvas.getContext('2d');
-        let ws = null;
+        const remoteAudio = document.getElementById('remote-audio');
+        const secureNotice = document.getElementById('secure-notice');
+
+        let pc = null;
+        let localStream = null;
         let audioContext = null;
-        let scriptProcessor = null;
-        let audioSource = null;
-        let stream = null;
-        const sampleRate = 16000;
-        const bufferSize = 4096;
+        let analyser = null;
+        let rafId = null;
         let waveformData = new Array(100).fill(0);
-        function addLog(message) {
+
+        function addLog(message, cls) {
             const time = new Date().toLocaleTimeString();
-            logArea.innerHTML += `[${time}] ${message}\n`;
+            const line = document.createElement('div');
+            line.textContent = `[${time}] ${message}`;
+            if (cls) line.className = cls;
+            logArea.appendChild(line);
             logArea.scrollTop = logArea.scrollHeight;
         }
         function drawWaveform() {
@@ -76,116 +91,160 @@
         function updateWaveform(audioBuffer) {
             const bufferLength = audioBuffer.length;
             let sum = 0;
-            for (let i = 0; i < bufferLength; i++) {
-                sum += Math.abs(audioBuffer[i]);
-            }
-            const avg = sum / bufferLength;
+            for (let i = 0; i < bufferLength; i++) sum += Math.abs(audioBuffer[i]);
             waveformData.shift();
-            waveformData.push(avg);
+            waveformData.push(sum / bufferLength);
             drawWaveform();
         }
-        async function startStream() {
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                audioContext = new AudioContext({ sampleRate: sampleRate });
-                audioSource = audioContext.createMediaStreamSource(stream);
-                scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-                audioSource.connect(scriptProcessor);
-                scriptProcessor.connect(audioContext.destination);
-                scriptProcessor.onaudioprocess = (event) => {
-                    const inputBuffer = event.inputBuffer;
-                    const channelData = inputBuffer.getChannelData(0);
-                    updateWaveform(channelData);
-                    const int16Data = new Int16Array(channelData.length);
-                    for (let i = 0; i < channelData.length; i++) {
-                        int16Data[i] = Math.max(-1, Math.min(1, channelData[i])) * 32767;
-                    }
-                    const base64Data = btoa(String.fromCharCode.apply(null, new Uint8Array(int16Data.buffer)));
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'audio', data: base64Data }));
+        function startWaveform(stream) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const src = audioContext.createMediaStreamSource(stream);
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 2048;
+            src.connect(analyser);
+            const buf = new Uint8Array(analyser.fftSize);
+            const tick = () => {
+                analyser.getByteTimeDomainData(buf);
+                let sum = 0;
+                for (let i = 0; i < buf.length; i++) sum += Math.abs(buf[i] - 128) / 128;
+                waveformData.shift();
+                waveformData.push(sum / buf.length);
+                drawWaveform();
+                rafId = requestAnimationFrame(tick);
+            };
+            tick();
+        }
+        function stopWaveform() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = null;
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            analyser = null;
+            waveformData = new Array(100).fill(0);
+            drawWaveform();
+        }
+
+        function waitForIceGathering(pc) {
+            return new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') return resolve();
+                const check = () => {
+                    if (pc.iceGatheringState === 'complete') {
+                        pc.removeEventListener('icegatheringstatechange', check);
+                        resolve();
                     }
                 };
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                connectionStatus.className = 'status active';
-                connectionStatus.textContent = '已连接';
-                addLog('已连接到语音服务');
+                pc.addEventListener('icegatheringstatechange', check);
+                // 兜底超时：局域网通常在 1s 内收集完 host 候选
+                setTimeout(resolve, 1500);
+            });
+        }
+
+        async function startCall() {
+            // 安全上下文检查：麦克风只在 HTTPS 或 localhost 可用
+            if (!window.isSecureContext) {
+                secureNotice.classList.add('show');
+                secureNotice.innerHTML = '⚠️ 当前页面不是“安全上下文”，浏览器会禁止访问麦克风。' +
+                    '请通过 <b>https://</b> 访问本服务（本服务已启用自签证书，' +
+                    '首次打开需在浏览器中点击“继续前往/高级→继续”以信任证书）。';
+                addLog('非安全上下文：getUserMedia 不可用', 'err');
+                return;
+            }
+            startBtn.disabled = true;
+            connectionStatus.className = 'status connecting';
+            connectionStatus.textContent = '连接中…';
+            addLog('正在获取麦克风权限…');
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+                });
             } catch (err) {
-                addLog(`麦克风授权失败: ${err.message}`);
+                addLog(`麦克风授权失败: ${err.name} ${err.message}`, 'err');
+                connectionStatus.className = 'status interrupted';
+                connectionStatus.textContent = '麦克风失败';
+                startBtn.disabled = false;
+                return;
             }
-        }
-        function stopStream() {
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                stream = null;
-            }
-            if (audioSource) {
-                audioSource.disconnect();
-                audioSource = null;
-            }
-            if (scriptProcessor) {
-                scriptProcessor.disconnect();
-                scriptProcessor = null;
-            }
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            connectionStatus.className = 'status';
-            connectionStatus.textContent = '未连接';
-            addLog('已断开语音服务');
-        }
-        startBtn.addEventListener('click', async () => {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
-            ws = new WebSocket(wsUrl);
-            ws.binaryType = 'arraybuffer';
-            ws.onopen = () => {
-                startStream();
+            speechStatus.textContent = '麦克风已开启';
+            startWaveform(localStream);
+            addLog('麦克风已就绪，正在建立 WebRTC 连接…');
+
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+            pc.ontrack = (event) => {
+                remoteAudio.srcObject = event.streams[0];
+                addLog('收到远端音频流（AI 语音）', 'ok');
             };
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                switch (data.type) {
-                    case 'transcript':
-                        speechStatus.textContent = data.is_partial ? '识别中...' : '已识别';
-                        agentStatus.textContent = `收到: ${data.text}`;
-                        if (data.is_partial) {
-                            addLog(`[Partial] ${data.text}`);
-                        } else {
-                            addLog(`[Final] ${data.text}`);
-                        }
-                        break;
-                    case 'interrupt':
-                        interruptOverlay.classList.add('active');
-                        setTimeout(() => interruptOverlay.classList.remove('active'), 1000);
-                        addLog('🔇 用户打断了当前回答');
-                        break;
-                    case 'error':
-                        addLog(`错误: ${data.message}`);
-                        break;
+            pc.onconnectionstatechange = () => {
+                addLog(`WebRTC 状态: ${pc.connectionState}`);
+                if (pc.connectionState === 'connected') {
+                    connectionStatus.className = 'status active';
+                    connectionStatus.textContent = '已连接';
+                    agentStatus.textContent = '通话中（直接说话即可）';
+                } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                    connectionStatus.className = 'status interrupted';
+                    connectionStatus.textContent = '连接中断';
                 }
             };
-            ws.onerror = (error) => {
-                addLog(`WebSocket错误: ${error.message}`);
-            };
-            ws.onclose = () => {
-                stopStream();
-                ws = null;
-            };
-        });
-        stopBtn.addEventListener('click', () => {
-            if (ws) {
-                ws.close();
-            } else {
-                stopStream();
+
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await waitForIceGathering(pc);
+
+                const payload = {
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type,
+                    pc_id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
+                };
+                addLog('发送 SDP offer 到 /offer …');
+                const resp = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) {
+                    const txt = await resp.text();
+                    throw new Error(`/offer 返回 ${resp.status}: ${txt}`);
+                }
+                const answer = await resp.json();
+                if (!answer.sdp) throw new Error('服务端未返回 SDP answer');
+                await pc.setRemoteDescription({ type: answer.type || 'answer', sdp: answer.sdp });
+                addLog('收到 SDP answer，连接建立中…', 'ok');
+                stopBtn.disabled = false;
+            } catch (err) {
+                addLog(`呼叫失败: ${err.message}`, 'err');
+                connectionStatus.className = 'status interrupted';
+                connectionStatus.textContent = '呼叫失败';
+                cleanupCall();
             }
+        }
+
+        function cleanupCall() {
+            if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+            if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+            remoteAudio.srcObject = null;
+            stopWaveform();
+            speechStatus.textContent = '等待麦克风';
+            agentStatus.textContent = '点击开始通话';
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        }
+
+        startBtn.addEventListener('click', startCall);
+        stopBtn.addEventListener('click', () => {
+            addLog('结束通话');
+            cleanupCall();
+            connectionStatus.className = 'status';
+            connectionStatus.textContent = '未连接';
         });
+
         window.addEventListener('resize', () => {
-            waveformCanvas.width = waveformContainer.clientWidth;
-            waveformCanvas.height = waveformContainer.clientHeight;
+            waveformCanvas.width = waveformCanvas.clientWidth;
+            waveformCanvas.height = waveformCanvas.clientHeight;
             drawWaveform();
         });
         window.dispatchEvent(new Event('resize'));
+        addLog('客户端就绪。请点击“开始通话”（需通过 https 访问以启用麦克风）。');
     </script></body></html>

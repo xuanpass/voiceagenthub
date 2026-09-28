@@ -241,6 +241,7 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
     
     # Get backend instances from room manager
     stt = _BACKEND_MANAGER.get_stt_backend()
+    await stt.abort()  # reset shared singleton buffers for this call
     current_router = room.router
     current_orchestrator = room.orchestrator
     current_tts = room.tts
@@ -280,8 +281,10 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
     try:
         await PipelineRunner().run(task)
     finally:
-        # Clean up resources
-        await stt.close()
+        # Clean up resources. NOTE: stt is a SHARED singleton created once by
+        # BackendManager; calling stt.close() would `del self._model` and break
+        # every later call. Use abort() to reset per-call buffers only.
+        await stt.abort()
         room.remove_connection(connection_id)
 
 
@@ -568,19 +571,6 @@ async def _on_startup():
     await _GATE_LOGGER.start()
 
 
-if __name__ == "__main__":
-    import uvicorn
-
-    ssl_kwargs = {}
-    key = os.environ.get("VOICEHUB_SSL_KEY")
-    cert = os.environ.get("VOICEHUB_SSL_CERT")
-    if key and cert:
-        ssl_kwargs = {"ssl_keyfile": key, "ssl_certfile": cert}
-        print(f"[VoiceHub] HTTPS on :{_SRV.get('port', 8765)} (cert={cert})")
-    else:
-        print(f"[VoiceHub] HTTP on :{_SRV.get('port', 8765)} (set VOICEHUB_SSL_* for HTTPS)")
-
-
 # 僵尸任务清理后台任务
 async def _cleanup_zombie_tasks():
     """定期清理超时任务和僵尸连接"""
@@ -607,9 +597,22 @@ async def _cleanup_zombie_tasks():
             logger.error(f"Cleanup task error: {e}")
             await asyncio.sleep(60)
 
+if __name__ == "__main__":
+    import uvicorn
+
+    ssl_kwargs = {}
+    key = os.environ.get("VOICEHUB_SSL_KEY")
+    cert = os.environ.get("VOICEHUB_SSL_CERT")
+    if key and cert:
+        ssl_kwargs = {"ssl_keyfile": key, "ssl_certfile": cert}
+        print(f"[VoiceHub] HTTPS on :{_SRV.get('port', 8765)} (cert={cert})")
+    else:
+        print(f"[VoiceHub] HTTP on :{_SRV.get('port', 8765)} (set VOICEHUB_SSL_* for HTTPS)")
+
     uvicorn.run(
         app,
         host=_SRV.get("host", "0.0.0.0"),
         port=_SRV.get("port", 8765),
         **ssl_kwargs,
     )
+
