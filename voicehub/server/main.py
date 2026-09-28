@@ -360,7 +360,7 @@ async def admin_panel():
     """Serve the admin dashboard"""
     admin_html = Path(__file__).parent / "admin.html"
     if admin_html.exists():
-        return FileResponse(admin_html)
+        return FileResponse(admin_html, headers={"Cache-Control": "no-store"})
     return JSONResponse({"error": "admin.html not found"}, status_code=404)
 
 
@@ -520,8 +520,9 @@ _CLIENT_HTML = Path(__file__).parent / "client.html"
 @app.get("/")
 async def index():
     # Serve the browser/phone WebRTC client.
+    # no-store 防止浏览器缓存旧版 client.html（旧版是裸 WebSocket，会导致“开始通话”报 WebSocket错误）
     if _CLIENT_HTML.exists():
-        return FileResponse(_CLIENT_HTML)
+        return FileResponse(_CLIENT_HTML, headers={"Cache-Control": "no-store"})
     return JSONResponse({"error": "client.html not found"}, status_code=404)
 
 
