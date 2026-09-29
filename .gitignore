@@ -53,3 +53,14 @@ temp/
 ! start.sh
 ! Dockerfile
 ! docker-compose.yml
+
+# 临时诊断脚本（voicehub 下，非项目核心资产，按需手动保留）
+voicehub/diag_hermes.py
+voicehub/verify_gate_apply.py
+voicehub/verify_gate_llm.py
+voicehub/verify_gate_mining.py
+
+# Python 字节码缓存（voicehub 下，因 !voicehub/** 重新纳入，这里再排除）
+voicehub/**/__pycache__/
+voicehub/**/*.pyc
+voicehub/**/*.pyo
