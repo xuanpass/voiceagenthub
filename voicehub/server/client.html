@@ -15,6 +15,8 @@
         .status.interrupted { background: #ef4444; color: #450a0a; font-weight: 600; }
         .waveform-container { height: 150px; border: 1px solid #334155; border-radius: 0.5rem; margin-bottom: 1rem; position: relative; overflow: hidden; background: #111827; }
         #waveform { width: 100%; height: 100%; }
+        .mic-meter { margin-bottom: 1rem; font-size: .9rem; color: #94a3b8; padding: .4rem .6rem; background: #1e293b; border-radius: .25rem; display: inline-block; }
+        .mic-meter.active { color: #052e16; background: #22c55e; font-weight: 600; }
         .controls { display: flex; gap: 1rem; justify-content: center; margin-bottom: 1rem; }
         button { padding: 0.75rem 1.5rem; border: none; border-radius: 0.5rem; background: #3b82f6; color: white; cursor: pointer; font-size: 1rem; }
         button:disabled { background: #475569; cursor: not-allowed; }
@@ -26,6 +28,12 @@
         .interrupt-overlay.active { opacity: 0.8; }
         .notice { background: #7c2d12; color: #fed7aa; padding: .75rem 1rem; border-radius: .5rem; margin-bottom: 1rem; font-size: .9rem; line-height: 1.5; display: none; }
         .notice.show { display: block; }
+        .transcript { height: 240px; overflow-y: auto; border: 1px solid #334155; border-radius: .5rem; padding: .75rem; background: #111827; margin-bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; }
+        .transcript .hint { color: #64748b; font-size: .85rem; }
+        .transcript .bubble { max-width: 85%; padding: .5rem .75rem; border-radius: .75rem; font-size: .92rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+        .transcript .bubble-user { align-self: flex-end; background: #1d4ed8; color: #eff6ff; border-bottom-right-radius: .2rem; }
+        .transcript .bubble-user-live { align-self: flex-end; background: #334155; color: #cbd5e1; border-bottom-right-radius: .2rem; font-style: italic; opacity: .85; }
+        .transcript .bubble-bot { align-self: flex-start; background: #14532d; color: #dcfce7; border-bottom-left-radius: .2rem; }
     </style></head><body>
     <div class="header">
         <h1>🎤 VoiceHub 语音助手</h1>
@@ -41,10 +49,14 @@
         <canvas id="waveform"></canvas>
         <div class="interrupt-overlay" id="interrupt-overlay">🔇 已打断</div>
     </div>
+        <div class="mic-meter" id="mic-meter">麦克风电平：—</div>
+        <div class="mic-meter" id="agent-meter">AI 语音轨道：未接收</div>
+        <div id="mic-warn" class="notice"></div>
     <div class="controls">
         <button id="start-btn">🎙️ 开始通话</button>
         <button id="stop-btn" disabled>🔴 结束通话</button>
     </div>
+    <div id="transcript" class="transcript"><div class="hint">对话转录将显示在这里：你说的话（蓝）和 AI 的回复（绿）。AI 回复同时也会用语音播报。</div></div>
     <div class="log-area" id="log-area"></div>
     <audio id="remote-audio" autoplay></audio>
     <script>
@@ -59,6 +71,53 @@
         const waveformCtx = waveformCanvas.getContext('2d');
         const remoteAudio = document.getElementById('remote-audio');
         const secureNotice = document.getElementById('secure-notice');
+        const micMeter = document.getElementById('mic-meter');
+        const micWarn = document.getElementById('mic-warn');
+        let _silenceSince = null;
+        let _cleaningUp = false;
+        let transcriptArea = document.getElementById('transcript');
+        let _lastRole = null;
+        let _openBubble = null;
+        function createBubble(cls, text) {
+            const el = document.createElement('div');
+            el.className = 'bubble ' + cls;
+            el.textContent = text;
+            el.dataset.role = cls;
+            transcriptArea.appendChild(el);
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+            return el;
+        }
+        function addTranscript(role, text, isFinal) {
+            if (role === 'user' && !isFinal) {
+                if (_openBubble && _openBubble.dataset.role === 'bubble-user-live') {
+                    _openBubble.textContent = '🎙️ 你（识别中）：' + text;
+                } else {
+                    _openBubble = createBubble('bubble-user-live', '🎙️ 你（识别中）：' + text);
+                }
+                _lastRole = 'user-live';
+                return;
+            }
+            if (role === 'user' && isFinal) {
+                if (_openBubble && _openBubble.dataset.role === 'bubble-user-live') _openBubble.remove();
+                _openBubble = createBubble('bubble-user', '🗣️ 你：' + text);
+                _lastRole = 'user';
+                return;
+            }
+            // bot：连续分片合并到同一个气泡
+            if (_lastRole === 'bot' && _openBubble) {
+                _openBubble.textContent += text;
+            } else {
+                _openBubble = createBubble('bubble-bot', '🤖 AI：' + text);
+            }
+            _lastRole = 'bot';
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+        }
+        function handleAppMessage(e) {
+            try {
+                const msg = JSON.parse(e.data);
+                if (msg && msg.type === 'transcript') addTranscript(msg.role, msg.text, !!msg.final);
+            } catch (_) {}
+        }
 
         let pc = null;
         let localStream = null;
@@ -107,9 +166,27 @@
                 analyser.getByteTimeDomainData(buf);
                 let sum = 0;
                 for (let i = 0; i < buf.length; i++) sum += Math.abs(buf[i] - 128) / 128;
+                const level = sum / buf.length;
                 waveformData.shift();
-                waveformData.push(sum / buf.length);
+                waveformData.push(level);
                 drawWaveform();
+                // 实时麦克风电平（0..1），并检测长时间静音给出告警。
+                const pct = Math.min(100, Math.round(level * 400));
+                micMeter.textContent = `麦克风电平：${pct}%`;
+                micMeter.className = 'mic-meter' + (pct > 2 ? ' active' : '');
+                const now = performance.now();
+                if (pct <= 2) {
+                    if (_silenceSince === null) _silenceSince = now;
+                    else if (now - _silenceSince > 2000) {
+                        micWarn.classList.add('show');
+                        micWarn.innerHTML = '⚠️ 麦克风超过 2 秒无信号：AI 收不到你的声音。' +
+                            '请检查：① 此浏览器标签页是否在前台（切到别的窗口会暂停采集）；' +
+                            '② 系统麦克风权限/默认输入设备是否选对；③ 说话音量是否过小。';
+                    }
+                } else {
+                    _silenceSince = null;
+                    micWarn.classList.remove('show');
+                }
                 rafId = requestAnimationFrame(tick);
             };
             tick();
@@ -121,6 +198,10 @@
             analyser = null;
             waveformData = new Array(100).fill(0);
             drawWaveform();
+            _silenceSince = null;
+            micMeter.textContent = '麦克风电平：—';
+            micMeter.className = 'mic-meter';
+            micWarn.classList.remove('show');
         }
 
         function waitForIceGathering(pc) {
@@ -149,6 +230,7 @@
                 return;
             }
             startBtn.disabled = true;
+            _cleaningUp = false;
             connectionStatus.className = 'status connecting';
             connectionStatus.textContent = '连接中…';
             addLog('正在获取麦克风权限…');
@@ -180,9 +262,32 @@
                 iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
             });
             localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+            // 监测麦克风轨道被浏览器/系统意外结束（设备释放、标签页切到后台等），
+            // 一旦 ended 立即提示，让用户区分"麦克风断了"与"AI 没回复"。
+            localStream.getAudioTracks().forEach(t => {
+                t.onended = () => {
+                    if (_cleaningUp) return;  // 主动停止（cleanupCall）不提示
+                    addLog('⚠️ 麦克风音频流已结束（设备被释放/标签页失焦），请重新点击“开始通话”', 'err');
+                    const w = document.getElementById('mic-warn');
+                    w.classList.add('show');
+                    w.innerHTML = '⚠️ 麦克风音频流已断开（track ended）：AI 收不到你的声音。常见原因：① 测试时把浏览器标签页切到后台（Chrome 会暂停后台麦克风采集）；② 麦克风设备被其它程序释放或掉线。请重新点击“开始通话”。';
+                };
+            });
+
+            // 数据通道：用于接收服务端推送的"文字转录"（你说了什么 / AI 回了什么），
+            // 与 TTS 音频并行，保证即使扬声器无声也能在页面上看到对话内容。
+            const dc = pc.createDataChannel('voicehub');
+            dc.onmessage = handleAppMessage;
+            pc.ondatachannel = (e) => { e.channel.onmessage = handleAppMessage; };
 
             pc.ontrack = (event) => {
                 remoteAudio.srcObject = event.streams[0];
+                // 显式 play()：部分浏览器对“异步设置的 srcObject + autoplay”会拦截，
+                // 导致 AI 语音轨道收到了却不出声。这里强制播放并捕获拦截异常。
+                remoteAudio.play().catch((e) => addLog('AI 语音播放被拦截: ' + e.message, 'warn'));
+                const m = document.getElementById('agent-meter');
+                m.textContent = 'AI 语音轨道：已接收 ▶';
+                m.className = 'mic-meter active';
                 addLog('收到远端音频流（AI 语音）', 'ok');
             };
             pc.onconnectionstatechange = () => {
@@ -231,14 +336,20 @@
         }
 
         function cleanupCall() {
+            _cleaningUp = true;
             if (pc) { try { pc.close(); } catch (e) {} pc = null; }
             if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
             remoteAudio.srcObject = null;
             stopWaveform();
+            // 重置转录面板（保留提示语）
+            transcriptArea.innerHTML = '<div class="hint">对话转录将显示在这里：你说的话（蓝）和 AI 的回复（绿）。AI 回复同时也会用语音播报。</div>';
+            _lastRole = null;
+            _openBubble = null;
             speechStatus.textContent = '等待麦克风';
             agentStatus.textContent = '点击开始通话';
             startBtn.disabled = false;
             stopBtn.disabled = true;
+            _cleaningUp = false;
         }
 
         startBtn.addEventListener('click', startCall);

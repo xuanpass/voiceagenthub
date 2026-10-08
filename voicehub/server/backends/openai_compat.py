@@ -8,6 +8,36 @@ from typing import AsyncIterator, Optional
 from .base import LLMBackend, Message
 
 
+def _extract_content(obj) -> Optional[str]:
+    """Safely pull the assistant text out of an OpenAI-style SSE chunk.
+
+    Tolerates the three common shapes (streaming delta, non-streaming
+    message, and legacy choice-level `text`) and any field being missing
+    or the wrong type — never raises, so a malformed/non-standard chunk
+    is simply skipped instead of crashing the whole stream.
+    """
+    if not isinstance(obj, dict):
+        return None
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None  # e.g. choices == ["some string"] -> skip
+    # streaming style: {"choices":[{"delta":{"content":"x"}}]}
+    delta = first.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+        return delta["content"]
+    # non-streaming style: {"choices":[{"message":{"content":"x"}}]}
+    msg = first.get("message")
+    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+        return msg["content"]
+    # legacy style: {"choices":[{"text":"x"}]}
+    if isinstance(first.get("text"), str):
+        return first["text"]
+    return None
+
+
 class OpenAICompatBackend(LLMBackend):
     def __init__(
         self,
@@ -101,7 +131,7 @@ class OpenAICompatBackend(LLMBackend):
                         obj = json.loads(data)
                     except json.JSONDecodeError:
                         continue
-                    delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                    delta = _extract_content(obj)
                     if delta:
                         reply_parts.append(delta)
                         yield delta

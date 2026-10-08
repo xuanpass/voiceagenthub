@@ -56,6 +56,7 @@ class GateProcessor(FrameProcessor):
             # In pipecat 1.12, InterimTranscriptionFrame is partial by nature;
             # TranscriptionFrame may also carry is_partial=True from some STT services.
             if isinstance(frame, InterimTranscriptionFrame) or (hasattr(frame, "is_partial") and frame.is_partial):
+                logger.warning(f'[PROBE-GATE] PARTIAL-TRANSFER text="{text[:60]}"')
                 await self.push_frame(frame, direction)
                 return
             result = self.rule_engine.evaluate(text)
@@ -70,12 +71,14 @@ class GateProcessor(FrameProcessor):
             if result and result[0] == "block":
                 record.final_verdict = "ignore"
                 await self.gate_logger.log(record)
-                logger.debug("[Gate] BLOCK(%s): %s", record.rule_name, text[:40])
+                logger.warning("[Gate] BLOCK(%s): %s", record.rule_name, text[:40])
+                logger.warning(f'[PROBE-GATE] BLOCK rule={record.rule_name} text="{text[:40]}"')
                 return  # drop
 
             if result and result[0] == "pass":
                 record.final_verdict = "respond"
                 await self.gate_logger.log(record)
+                logger.warning(f'[PROBE-GATE] PASS rule={record.rule_name} text="{text[:40]}"')
                 await self.push_frame(frame, direction)
                 return
 
@@ -86,13 +89,17 @@ class GateProcessor(FrameProcessor):
                 if verdict == "ignore":
                     record.final_verdict = "ignore"
                     await self.gate_logger.log(record)
-                    logger.debug("[Gate] LLM-IGNORE: %s", text[:40])
+                    logger.warning(f'[PROBE-GATE] LLM-IGNORE text="{text[:40]}"')
                     return  # drop
                 # respond or None (reviewer down) -> fail-open
                 record.final_verdict = "respond"
 
             await self.gate_logger.log(record)
+            logger.warning(f'[PROBE-GATE] RESPOND(llm-or-failopen) text="{text[:40]}"')
             await self.push_frame(frame, direction)
             return
 
+        # 非转录帧（StartFrame / EndFrame / CancelFrame / InterruptionFrame 等系统帧）
+        # 一律交给基类处理后向下游透传，保证 Router / transport.output 正常启动与关闭。
         await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)

@@ -25,6 +25,7 @@ import logging
 import uuid
 import json
 import time
+import wave
 from functools import wraps
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
@@ -35,7 +36,9 @@ from collections import deque
 from .monitoring import monitor, get_metrics, get_health_check, get_full_health
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import TranscriptionFrame, TTSAudioRawFrame
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.frames.frames import TranscriptionFrame, TTSAudioRawFrame, InterimTranscriptionFrame, InputAudioRawFrame, OutputTransportMessageFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask
@@ -80,16 +83,38 @@ class WebSocketLogHandler(logging.Handler):
             })))
 
 
+# 把 WebSocketLogHandler 挂到 root logger，并仅放行 `[PROBE` 前缀的 warning。
+# 否则：① 管理面板 /api/logs 永远返回空（log_buffer 无写入）；② pipecat/uvicorn 的海量
+# warning 会冲掉我们的探针。挂 root + 前缀过滤后，所有模块（main / streaming_whisper /
+# gate）里 `logger.warning("[PROBE...]")` 都能实时进面板与 websocket。
+class _ProbeFilter(logging.Filter):
+    def filter(self, record):
+        return str(record.getMessage()).startswith("[PROBE")
+
+
+_log_handler = WebSocketLogHandler()
+_log_handler.setLevel(logging.WARNING)
+_log_handler.addFilter(_ProbeFilter())
+logging.getLogger().addHandler(_log_handler)
+
+# 启动健康探针：确认日志通道（/api/logs 面板 + 管理 websocket）已打通。
+# 重启后管理面板“系统日志”会立即显示这一条，证明 PROBE 已能进面板。
+logging.getLogger("voicehub").warning(
+    "[PROBE-INIT] VoiceHub logging channel online — 管理面板“系统日志”已可实时显示 PROBE"
+)
+
+
 class RouterProcessor(FrameProcessor):
     """Intercepts the user transcript, routes to the right agent, and emits
     per-sentence TTS audio frames with that agent's voice."""
 
-    def __init__(self, router: Router, backends: dict, tts: TTSEngine, orchestrator: Orchestrator, conv_id: str):
+    def __init__(self, router: Router, backends: dict, tts: TTSEngine, orchestrator: Orchestrator, conv_id: str, transport=None):
         super().__init__()
         self.router = router
         self.backends = backends
         self.tts = tts
         self.orchestrator = orchestrator
+        self._transport = transport
         # unique per WebRTC connection -> isolates each conversation's history
         self.conv_id = conv_id
         # per-connection active agent: avoids clobbering when several calls
@@ -107,6 +132,10 @@ class RouterProcessor(FrameProcessor):
         return f"{prefix}{self.conv_id}"
 
     async def _speak(self, text: str, agent_key: str) -> None:
+        logger.warning(f'[PROBE-TTS] synth-start agent={agent_key} text="{text[:30]}"')
+        # 把 AI 的文字回复也推给浏览器，页面渲染成可见转录（与 TTS 音频双通道）。
+        await _send_client_msg(self._transport,
+                               {"type": "transcript", "role": "bot", "text": text, "final": True})
         for sentence in split_sentences(text):
             pcm = await self.tts.synth_pcm(sentence, agent_key)
             if pcm:
@@ -118,6 +147,8 @@ class RouterProcessor(FrameProcessor):
                     ),
                     FrameDirection.DOWNSTREAM,
                 )
+            else:
+                logger.warning(f'[PROBE-TTS] empty agent={agent_key} sentence="{sentence[:20]}"')
 
     async def process_frame(self, frame, direction: FrameDirection):
         # STT emits TranscriptionFrame; intercept it, do NOT forward downstream.
@@ -136,6 +167,7 @@ class RouterProcessor(FrameProcessor):
             sess = self._session(agent_key)
             # P1: only speak when final transcription is received
             is_final = not hasattr(frame, "is_partial") or not frame.is_partial
+            logger.warning(f'[PROBE-ROUTER] recv text="{text[:40]}" is_final={is_final} agent={agent_key}')
             if is_final:
                 self.active = res.agent
                 if res.collab and len(res.collab_agents) >= 2:
@@ -173,7 +205,10 @@ class RouterProcessor(FrameProcessor):
                             break
                         await self._speak(piece, agent_key)
             return
+        # 非转录帧（StartFrame / EndFrame / CancelFrame / InterruptionFrame 等系统帧）
+        # 一律交给基类处理后向下游透传，保证 transport.output 正常启动与关闭。
         await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
 
 
 def _build_stack():
@@ -230,6 +265,145 @@ async def _bot_background(webrtc_connection, room_id: Optional[str] = None):
     asyncio.create_task(_bot(webrtc_connection, room_id))
 
 
+async def _send_client_msg(transport, msg: dict) -> None:
+    """经 WebRTC 数据通道向浏览器推送一条应用消息（json 序列化）。
+
+    页面据此渲染可见的文字转录（用户说了什么 / AI 回了什么），
+    与下行 TTS 音频形成"声音 + 文字"双通道，消除"到底是语音还是文本"的困惑。
+    数据通道未就绪时 pipecat 会自动排队/丢弃，不会阻塞 pipeline。
+    """
+    if transport is None:
+        return
+    try:
+        await transport.output().send_message(OutputTransportMessageFrame(message=msg))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f'[PROBE-CLIENT-MSG] err {e!r}')
+
+
+class CallTranscriptRecorder(FrameProcessor):
+    """Per-call transcript logger (real-time append).
+
+    放在 STT 之后、Gate 之前，捕获 STT 产出的全部转写文本（partial + final），
+    即便随后被 Gate 的 BLOCK/LLM-IGNORE 丢弃也不漏记——忠实记录"麦克风这次
+    到底听到了什么"。文本**实时追加**写入 transcripts/call-<conn>-<ts>.txt，
+    不依赖通话 finally（idle 软断时 finally 可能不跑，文件照样生成）。
+    通话结束 save() 仅记一条 PROBE 日志并返回路径。
+    """
+
+    def __init__(self, connection_id: str, transport=None):
+        super().__init__()
+        self._conn = connection_id
+        self._finals: list[str] = []
+        self._last_partial = ""
+        self._path: str | None = None
+        self._transport = transport
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            text = (getattr(frame, "text", "") or "").strip()
+            if text:
+                is_partial = isinstance(frame, InterimTranscriptionFrame) or getattr(frame, "is_partial", False)
+                if is_partial:
+                    if text != self._last_partial:
+                        self._last_partial = text
+                        self._append(f"[partial] {text}")
+                        await _send_client_msg(self._transport,
+                                               {"type": "transcript", "role": "user", "text": text, "final": False})
+                else:
+                    self._finals.append(text)
+                    self._last_partial = ""
+                    self._append(f"[final] {text}")
+                    await _send_client_msg(self._transport,
+                                           {"type": "transcript", "role": "user", "text": text, "final": True})
+            await self.push_frame(frame, direction)
+            return
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+
+    def _append(self, line: str) -> None:
+        """实时追加一行到转写文件（不依赖 finally）。"""
+        try:
+            out_dir = Path(__file__).resolve().parent.parent / "transcripts"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if self._path is None:
+                self._path = str(out_dir / f"call-{self._conn}-{int(time.time() * 1000)}.txt")
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+                f.flush()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f'[PROBE-TRANSCRIPT] append-err {e!r}')
+
+    def save(self) -> str | None:
+        """通话结束：仅记一条 PROBE 日志并返回路径（内容已实时写入）。"""
+        if self._path:
+            logging.getLogger(__name__).warning(
+                f'[PROBE-TRANSCRIPT] saved={self._path} finals={len(self._finals)}'
+            )
+            return self._path
+        return None
+
+
+class RawAudioRecorder(FrameProcessor):
+    """每通原始音频落盘（实时 flush）：捕获 transport 实际收到的麦克风 PCM（16k/mono）。
+
+    无论 VAD/STT 是否触发，都如实记录"服务器到底收到了什么声音"。
+    用途：定责——是用户真声（但断续）、还是静音/噪声、还是客户端根本没发。
+    放在 pipeline 最前端（transport.input 之后、VAD 之前），拿到的是
+    服务器从 WebRTC 收到的原始帧，不掺任何下游处理。
+    每累积 ~2s 音频或每 2s 覆盖写一次 WAV，保证 idle 软断等异常情况下文件也已生成。
+    """
+
+    def __init__(self, connection_id: str):
+        super().__init__()
+        self._conn = connection_id
+        self._buf = bytearray()
+        self._sr = 16000
+        self._n_frames = 0
+        self._path: str | None = None
+        self._last_flush = 0.0
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        if isinstance(frame, InputAudioRawFrame):
+            self._buf.extend(frame.audio)
+            self._n_frames += 1
+            now = time.time()
+            # ~2s (64000 bytes @ 16k/16bit) 或每 2s 覆盖写一次，保证异常时也有文件
+            if len(self._buf) >= 64000 or (now - self._last_flush) >= 2:
+                self._flush_wav()
+                self._last_flush = now
+            await self.push_frame(frame, direction)
+            return
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+
+    def _flush_wav(self) -> None:
+        if not self._buf:
+            return
+        try:
+            out_dir = Path(__file__).resolve().parent.parent / "recordings"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if self._path is None:
+                self._path = str(out_dir / f"call-{self._conn}-{int(time.time() * 1000)}.wav")
+            with wave.open(self._path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(self._sr)
+                wf.writeframes(bytes(self._buf))
+        except Exception as e:
+            logging.getLogger(__name__).warning(f'[PROBE-REC] flush-err {e!r}')
+
+    def save(self) -> str | None:
+        """通话结束：刷最终 WAV 并记 PROBE 日志。"""
+        self._flush_wav()
+        if self._path:
+            logging.getLogger(__name__).warning(
+                f'[PROBE-REC] saved={self._path} bytes={len(self._buf)} '
+                f'frames={self._n_frames} dur_s={len(self._buf) / 2 / self._sr:.1f}'
+            )
+            return self._path
+        return None
+
+
 async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] = None) -> None:
     """Per-connection bot: build pipeline and run until the peer disconnects."""
     # Get the target room
@@ -268,19 +442,61 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
         reviewer=_GATE_REVIEWER,
         conv_id=conv_id,
     )
+
+    # 每通独立的转写记录器：放在 STT 之后、Gate 之前，忠实记录"麦克风听到了什么"
+    # （含被 Gate 忽略的文本），通话结束汇总写 transcripts/call-<conn>-<ts>.txt。
+    transcript_rec = CallTranscriptRecorder(connection_id)
+
+    # 每通原始音频落盘：放在 pipeline 最前端（VAD 之前），如实记录服务器从 WebRTC
+    # 收到的原始 PCM——用于定责"浏览器到底有没有把麦克风声音稳定推过来"。
+    raw_rec = RawAudioRecorder(connection_id)
     
+    # VAD 参数：实测用户麦克风平均 RMS 仅 2~6%（偏轻），环境本身安静(RMS 2~6% 主要是
+    # 用户自己的断续语音)。之前设 0.85/0.8 过高，真实偏轻语音几乎不触发 VADUserStoppedSpeakingFrame
+    # → STT 只能靠 idle_flush(1.5s) 兜底 finalize，且静音段被盲切喂 Whisper 产生幻觉。
+    # 降到 0.6/0.4：真实语音(峰值可达 97%)能稳定触发起止帧，及时 finalize；配合 STT 侧
+    # 能量门控 + Whisper no_speech 过滤，噪声/静音不再污染识别。
+    # 注意：必须在 TransportParams / VADProcessor 引用之前定义，否则 UnboundLocalError。
+    _vad_params = VADParams(
+        confidence=0.6,
+        min_volume=0.4,
+        start_secs=0.25,
+        stop_secs=0.4,
+    )
     params = TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
-        vad_analyzer=SileroVADAnalyzer(),
+        # 客户端 mic 上行是 48kHz/双声道（probe 实测 sr=48000 layout=stereo nbch=2）。
+        # 下游 silero VAD / faster-whisper 期望 16kHz 单声道。让 SmallWebRTC 的
+        # audio_in_resampler 做 48k→16k + stereo→mono 转换（av17 的 resampler 在
+        # 同采样率声道合并有坑，必须采样率也变才稳），故目标显式设 16k/1ch。
+        audio_in_sample_rate=16000,
+        audio_in_channels=1,
+        audio_out_sample_rate=TTS_SAMPLE_RATE,
+        vad_analyzer=SileroVADAnalyzer(params=_vad_params),
     )
     transport = SmallWebRTCTransport(webrtc_connection, params)
-    pipeline = Pipeline([transport.input(), stt, gate_proc, router_proc, transport.output()])
+    # 把 transport 引用注入到转写记录器与路由器，便于把"用户说了什么 / AI 回了什么"
+    # 经 WebRTC 数据通道推到浏览器，页面渲染成可见文字转录（声音 + 文字双通道）。
+    transcript_rec._transport = transport
+    router_proc._transport = transport
+    # VAD 处理器（设计意图里缺的一环）：在 STT 之前检测语音起止，说完话即发
+    # VADUserStoppedSpeakingFrame，让 STT 可靠地把 partial 转成 final → 触发 LLM/TTS。
+    # 输入音频已被 transport 重采样为 16k/mono，符合 Silero VAD 要求。
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=_vad_params))
+    pipeline = Pipeline([transport.input(), raw_rec, vad, stt, transcript_rec, gate_proc, router_proc, transport.output()])
     task = PipelineTask(pipeline)
     
     try:
         await PipelineRunner().run(task)
     finally:
+        # 通话结束：先落盘"原始音频"与"转写文本"（忠实记录本次服务器收到了什么），再清理。
+        _wav_path = raw_rec.save()
+        if _wav_path:
+            logging.getLogger(__name__).warning(f'[PROBE-REC] call-ended conn={connection_id} path={_wav_path}')
+        _rec_path = transcript_rec.save()
+        if _rec_path:
+            logging.getLogger(__name__).warning(f'[PROBE-TRANSCRIPT] call-ended conn={connection_id} path={_rec_path}')
         # Clean up resources. NOTE: stt is a SHARED singleton created once by
         # BackendManager; calling stt.close() would `del self._model` and break
         # every later call. Use abort() to reset per-call buffers only.

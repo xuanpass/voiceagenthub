@@ -4,7 +4,11 @@
 #   WorkBuddy / CherryStudio 在 .109, 经 .109 上的桥接代理对外暴露
 # 凭据用 ${ENV} 占位, 见 .env.example; 真实值写入 .101 的 .env
 
-default_agent: openclaw
+# 默认 agent 切到 hermes: OpenClaw 走桌面 Gateway, 101 上该 Gateway 未常驻,
+# 会导致每次通话 LLM 调用报 "gateway closed (1011)"; hermes 的 OpenAI Bridge
+# (127.0.0.1:8642) 已在 101 常驻且鉴权可用, 语音闭环稳定。
+# 等 OpenClaw 桌面 Gateway 起来后, 可改回 openclaw; 届时也可直接说"小克/克劳德"按名调用。
+default_agent: hermes
 
 server:
   host: 0.0.0.0
