@@ -5,7 +5,7 @@ from .config import load_config
 from .router import Router
 from .orchestrator import Orchestrator
 from .tts import TTSEngine
-from .backend_manager import BackendManager
+from .backend_manager import BackendManager, build_voice_map
 
 
 class VoiceRoom:
@@ -17,11 +17,10 @@ class VoiceRoom:
         self.conv_ids: set[str] = set()
         self.active_agents: Dict[str, str] = {}  # connection_id -> active agent
         
-        # 每个房间独立的路由、编排、TTS实例
+        # 每个房间独立的路由、编排、TTS实例 (voice_map 与 BackendManager 共用
+        # build_voice_map: env TTS_VOICE_* 覆盖 + tts_voice 兜底 + disabled 跳过)
         self.router = Router(config)
-        self.tts = TTSEngine(
-            {k: a["tts_voice"] for k, a in config["agents"].items() if not a.get("disabled")}
-        )
+        self.tts = TTSEngine(build_voice_map(config))
         self.backend_manager = BackendManager()
         self.orchestrator = Orchestrator(
             self.backend_manager.llm_backends, 

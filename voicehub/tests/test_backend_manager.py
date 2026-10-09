@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import server.backend_manager as bm_mod
-from server.backend_manager import BackendManager
+from server.backend_manager import BackendManager, build_voice_map
 
 # backend_manager / main 顶部会 load_dotenv(), 把根 .env 或 voicehub/.env 的变量
 # 注入 os.environ (如 WHISPER_MODEL=small, ACTIVE_STT_BACKEND=sensevoice),
@@ -39,6 +39,7 @@ def _fake_config():
             "model": "small",
             "device": "cpu",
             "compute_type": "int8",
+            "model_dir": "/yaml/models/sensevoice",
         },
         "agents": {
             "hermes": {"tts_voice": "zh-CN-YunyangNeural", "adapter": "openai_compat"},
@@ -136,3 +137,23 @@ def test_tts_cherry_compat_env_key(bm, monkeypatch):
     monkeypatch.setenv("TTS_VOICE_CHERRY", "zh-CN-XiaoxiaoNeural")
     manager = BackendManager()
     assert manager.tts_backends["edge"].voice_map["cherrystudio"] == "zh-CN-XiaoxiaoNeural"
+
+
+def test_stt_sensevoice_model_dir_from_yaml(bm, monkeypatch):
+    monkeypatch.setenv("ACTIVE_STT_BACKEND", "sensevoice")
+    BackendManager()
+    # env 未设时 yaml stt.model_dir 生效, 而非硬编码绝对路径
+    assert bm["sensevoice"]["model_dir"] == "/yaml/models/sensevoice"
+
+
+def test_stt_sensevoice_model_dir_env_overrides_yaml(bm, monkeypatch):
+    monkeypatch.setenv("ACTIVE_STT_BACKEND", "sensevoice")
+    monkeypatch.setenv("SENSEVOICE_MODEL_DIR", "/custom/models/sensevoice")
+    BackendManager()
+    assert bm["sensevoice"]["model_dir"] == "/custom/models/sensevoice"
+
+
+def test_build_voice_map_shared_with_backend_manager(bm):
+    # VoiceRoom 与 BackendManager 共用 build_voice_map, 防两处音色逻辑漂移
+    manager = BackendManager()
+    assert build_voice_map(_fake_config()) == manager.tts_backends["edge"].voice_map

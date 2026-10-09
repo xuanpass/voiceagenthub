@@ -11,6 +11,22 @@ from .backends.factory import build_backends
 load_dotenv()
 
 
+def build_voice_map(config: dict) -> dict[str, str]:
+    """按 agent 名从配置构建 TTS voice_map: 键 = agent 名, disabled 跳过。
+    env TTS_VOICE_<键大写> 覆盖单个音色; cherrystudio 兼容旧键 TTS_VOICE_CHERRY。
+    BackendManager 与各 VoiceRoom 共用, 保证音色选择处处一致。
+    """
+    voice_map: dict[str, str] = {}
+    for key, a in config.get("agents", {}).items():
+        if a.get("disabled"):
+            continue
+        voice = os.getenv(f"TTS_VOICE_{key.upper()}")
+        if voice is None and key == "cherrystudio":
+            voice = os.getenv("TTS_VOICE_CHERRY")
+        voice_map[key] = voice or a.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+    return voice_map
+
+
 class BackendManager:
     """统一管理多后端实例的单例类"""
     
@@ -63,9 +79,10 @@ class BackendManager:
         """初始化STT后端（只实例化真正启用的那个，避免两个模型同时占内存）。
 
         配置优先级: env > agents.yaml stt 段 > 代码默认值。yaml 提供基准
-        (active/model/device/compute_type), 环境变量 (ACTIVE_STT_BACKEND /
-        WHISPER_*) 可覆盖以便单机临时切换。active_stt_backend 在这里一并
-        解析: sensevoice 成功即用, 失败回落 whisper 时同步改写 env 与属性。
+        (active/model/device/compute_type/model_dir), 环境变量 (ACTIVE_STT_BACKEND /
+        WHISPER_* / SENSEVOICE_MODEL_DIR) 可覆盖以便单机临时切换。
+        active_stt_backend 在这里一并解析: sensevoice 成功即用, 失败回落
+        whisper 时同步改写 env 与属性。
         """
         from .config import load_config
         stt_cfg = load_config().get("stt", {})
@@ -79,7 +96,11 @@ class BackendManager:
                     DEFAULT_SENSEVOICE_DIR,
                     SenseVoiceSTTService,
                 )
-                sv_dir = os.getenv("SENSEVOICE_MODEL_DIR") or DEFAULT_SENSEVOICE_DIR
+                sv_dir = (
+                    os.getenv("SENSEVOICE_MODEL_DIR")
+                    or stt_cfg.get("model_dir")
+                    or DEFAULT_SENSEVOICE_DIR
+                )
                 self.stt_backends["sensevoice"] = SenseVoiceSTTService(model_dir=sv_dir)
                 self.active_stt_backend = "sensevoice"
                 logging.getLogger(__name__).warning(
@@ -103,23 +124,12 @@ class BackendManager:
         self.active_stt_backend = active
     
     def _init_tts_backends(self) -> None:
-        """初始化TTS后端。voice_map 按 agent 名从 agents.yaml 构建, 不再硬编码
-        别名键 "cherry" (与 agent 名 cherrystudio 错位) ; disabled 的 agent 跳过。
-        env TTS_VOICE_<键大写> 可覆盖单个音色; cherrystudio 兼容旧键
-        TTS_VOICE_CHERRY (.env 遗留配置继续生效)。
+        """初始化TTS后端。voice_map 由 build_voice_map 构建 (键 = agent 名,
+        disabled 跳过, env TTS_VOICE_* 覆盖, cherrystudio 兼容 TTS_VOICE_CHERRY),
+        与各 VoiceRoom 共用同一逻辑。
         """
         from .config import load_config
-        agents = load_config().get("agents", {})
-        voice_map = {}
-        for key, a in agents.items():
-            if a.get("disabled"):
-                continue
-            voice = os.getenv(f"TTS_VOICE_{key.upper()}")
-            if voice is None and key == "cherrystudio":
-                voice = os.getenv("TTS_VOICE_CHERRY")
-            voice_map[key] = voice or a.get("tts_voice", "zh-CN-XiaoxiaoNeural")
-
-        self.tts_backends["edge"] = TTSEngine(voice_map=voice_map)
+        self.tts_backends["edge"] = TTSEngine(voice_map=build_voice_map(load_config()))
     
     def get_llm_backend(self, name: Optional[str] = None) -> LLMBackend:
         """获取指定的LLM后端实例"""
