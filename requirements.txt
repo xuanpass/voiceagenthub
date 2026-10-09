@@ -12,3 +12,5 @@ silero-vad>=6.2.3
 websockets>=17.1
 prometheus-client>=0.26.0
 pyyaml>=6.0.3
+aiortc>=1.15.0
+sherpa-onnx>=1.13.8

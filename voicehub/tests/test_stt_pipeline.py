@@ -18,6 +18,8 @@ Conventions copied from ``test_backends.py``:
 from __future__ import annotations
 
 import asyncio
+import math
+import struct
 import sys
 import types
 from pathlib import Path
@@ -36,18 +38,23 @@ class _Seg:
 
     def __init__(self, text: str) -> None:
         self.text = text
+        self.no_speech_prob = 0.0
 
 
 class _FakeWhisperModel:
     """Drop-in replacement for ``faster_whisper.WhisperModel``.
 
-    Never downloads or loads a model; ``transcribe_stream`` returns a single
-    segment carrying a fixed transcription so the pipeline runs end-to-end.
+    Never downloads or loads a model; ``transcribe`` (the streaming service's
+    process_frame path) and ``transcribe_stream`` return a single segment
+    carrying a fixed transcription so the pipeline runs end-to-end.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         self._args = args
         self._kwargs = kwargs
+
+    def transcribe(self, audio, **kwargs):
+        return ([_Seg("你好世界")], None)
 
     def transcribe_stream(self, audio, stream=True):  # noqa: D401 - API mirror
         return ([_Seg("你好世界")], None)
@@ -62,7 +69,17 @@ class InputAudioRawFrame:
         self.pts = pts
 
 
+class VADUserStartedSpeakingFrame:
+    def __init__(self, pts=None):
+        self.pts = pts
+
+
 class VADUserStoppedSpeakingFrame:
+    def __init__(self, pts=None):
+        self.pts = pts
+
+
+class EndFrame:
     def __init__(self, pts=None):
         self.pts = pts
 
@@ -97,8 +114,10 @@ def _build_fake_modules():
     pc_frames_pkg = types.ModuleType("pipecat.frames")
     pc_frames = types.ModuleType("pipecat.frames.frames")
     pc_frames.InputAudioRawFrame = InputAudioRawFrame
+    pc_frames.VADUserStartedSpeakingFrame = VADUserStartedSpeakingFrame
     pc_frames.VADUserStoppedSpeakingFrame = VADUserStoppedSpeakingFrame
     pc_frames.TranscriptionFrame = TranscriptionFrame
+    pc_frames.EndFrame = EndFrame
     pc_frames_pkg.frames = pc_frames
 
     pc_proc_pkg = types.ModuleType("pipecat.processors")
@@ -151,8 +170,10 @@ def stt_env(monkeypatch):
     # imported (real pipecat vs fake pipecat).
     monkeypatch.setattr(sw_mod, "WhisperModel", _FakeWhisperModel)
     monkeypatch.setattr(sw_mod, "InputAudioRawFrame", InputAudioRawFrame)
+    monkeypatch.setattr(sw_mod, "VADUserStartedSpeakingFrame", VADUserStartedSpeakingFrame)
     monkeypatch.setattr(sw_mod, "VADUserStoppedSpeakingFrame", VADUserStoppedSpeakingFrame)
     monkeypatch.setattr(sw_mod, "TranscriptionFrame", TranscriptionFrame)
+    monkeypatch.setattr(sw_mod, "EndFrame", EndFrame)
     monkeypatch.setattr(sw_mod, "FrameProcessor", FrameProcessor)
 
     return sw_mod.StreamingWhisperSTTService, sw_mod
@@ -162,15 +183,24 @@ def stt_env(monkeypatch):
 # helpers
 # --------------------------------------------------------------------------
 
-def _make_audio_frame(duration: float = 0.2, pts: int = 0) -> InputAudioRawFrame:
+def _make_audio_frame(duration: float = 0.6, pts: int = 0) -> InputAudioRawFrame:
     """Build an ``InputAudioRawFrame`` of ``duration`` seconds at 16kHz mono.
 
     Bytes required for ``duration`` seconds of 16-bit mono audio:
         num_bytes = 2 * sample_rate * duration
-    0.2s -> 6400 bytes (>= the 0.15s threshold used by the service).
+    0.6s -> 19200 bytes (>= the 0.5s buffer threshold used by the service).
+
+    Samples are a 440Hz sine wave (amplitude 0.3 FS), NOT silence: the service
+    applies an RMS energy gate (``_silence_threshold=0.01``) before calling
+    Whisper, so an all-zero buffer would be skipped and no frame emitted.
     """
     num_bytes = int(2 * 16000 * duration)
-    audio = b"\x00" * num_bytes
+    amp = int(0.3 * 32768)
+    samples = [
+        int(amp * math.sin(2 * math.pi * 440 * i / 16000))
+        for i in range(num_bytes // 2)
+    ]
+    audio = struct.pack(f"<{len(samples)}h", *samples)
     return InputAudioRawFrame(
         audio=audio,
         sample_rate=16000,
@@ -214,7 +244,7 @@ def test_stt_emits_partial_on_audio(stt_env):
             self.pushed.append(frame)
 
     svc = CapturingSTT()
-    asyncio.run(svc.process_frame(_make_audio_frame(0.2), FrameDirection.DOWNSTREAM))
+    asyncio.run(svc.process_frame(_make_audio_frame(), FrameDirection.DOWNSTREAM))
 
     transcriptions = _transcriptions(svc)
     assert len(transcriptions) == 1, "exactly one TranscriptionFrame expected"
@@ -236,7 +266,7 @@ def test_stt_emits_final_on_vad_stop(stt_env):
             self.pushed.append(frame)
 
     svc = CapturingSTT()
-    asyncio.run(svc.process_frame(_make_audio_frame(0.2), FrameDirection.DOWNSTREAM))
+    asyncio.run(svc.process_frame(_make_audio_frame(), FrameDirection.DOWNSTREAM))
     asyncio.run(
         svc.process_frame(VADUserStoppedSpeakingFrame(pts=0), FrameDirection.DOWNSTREAM)
     )

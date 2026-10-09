@@ -19,10 +19,18 @@ def test_config_loads(router):
 
 
 def test_route_by_alias(router):
-    r = router.route("赫尔墨斯，帮我写个总结")
+    # agents.yaml 的 default_agent 现为 hermes；若不传 active，route() 默认用
+    # default(=hermes) 作为当前 agent，此时 key==active，switched 恒为 False。
+    # 显式传 active="openclaw" 模拟"从别的智能体唤醒赫尔墨斯"，才能验证别名
+    # 路由确实产生了切换（switched=True）。
+    r = router.route("赫尔墨斯，帮我写个总结", active="openclaw")
     assert r.agent == "hermes"
     assert r.switched is True
     assert "赫尔墨斯" not in r.text
+    # 同 agent 场景（active 已是 hermes）不应算切换，switched 必须为 False。
+    r2 = router.route("赫尔墨斯，再帮我写一个", active="hermes")
+    assert r2.agent == "hermes"
+    assert r2.switched is False
 
 
 def test_route_fallback_active(router):

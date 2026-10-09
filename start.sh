@@ -11,14 +11,19 @@ if [ "$(printf "%s\n" "$PYTHON_REQUIRED" "$PYTHON_VERSION" | sort -V | head -n1)
     exit 1
 fi
 
-# 检查虚拟环境
-if [ ! -d "venv" ]; then
-    echo "创建虚拟环境..."
-    python3 -m venv venv
+# 检查虚拟环境（优先使用已装好依赖的 .venv，否则回退到 venv）
+if [ -d ".venv" ]; then
+    VENV=".venv"
+else
+    VENV="venv"
+    if [ ! -d "$VENV" ]; then
+        echo "创建虚拟环境..."
+        python3 -m venv "$VENV"
+    fi
 fi
 
 # 激活虚拟环境
-source venv/bin/activate
+source "$VENV/bin/activate"
 
 # 安装依赖
 echo "安装依赖..."
@@ -35,10 +40,11 @@ if [ ! -f "config.yaml" ]; then
     cp config.yaml.example config.yaml
 fi
 
-# 启动服务
+# 启动服务（main.py 使用相对导入，必须以包方式运行：python -m server.main）
 echo "启动VoiceHub服务..."
-export PYTHONPATH="$PYTHONPATH:$(pwd)"
-python3 voicehub/server/main.py
+export PYTHONPATH="$PYTHONPATH:$(dirname "$0")/voicehub"
+cd "$(dirname "$0")/voicehub" || exit 1
+exec python -u -m server.main
 
 # 暂停等待用户输入
 read -p "服务已停止，按任意键退出..."

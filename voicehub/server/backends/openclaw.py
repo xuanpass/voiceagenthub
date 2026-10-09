@@ -35,6 +35,10 @@ class OpenClawBackend(LLMBackend):
                 pass
 
     async def send(self, text: str, session_id: str, context: Optional[list[Message]] = None, abort: Optional[asyncio.Event] = None) -> AsyncIterator[str]:
+        # NOTE: `context` is intentionally NOT forwarded to the CLI. OpenClaw
+        # maintains its own per-session history keyed by --session-id, so
+        # replaying `context` here would duplicate the conversation it already
+        # has. Signature stays aligned with LLMBackend.send() for LSP/dispatch.
         if not (shutil.which(self.bin) or os.path.exists(self.bin)):
             yield "[VoiceHub] openclaw CLI not found: " + self.bin
             return

@@ -5,7 +5,7 @@ import asyncio
 import json
 import httpx
 from typing import AsyncIterator, Optional
-from .base import LLMBackend, Message
+from .base import LLMBackend, Message, VOICE_FORMAT_SYSTEM_PROMPT
 
 
 def _extract_content(obj) -> Optional[str]:
@@ -102,6 +102,10 @@ class OpenAICompatBackend(LLMBackend):
             messages = [{"role": m.role, "content": m.content} for m in context]
         else:
             messages = list(self._history(session_id))
+        # 注入语音友好 system 约束（gate 门控/挖掘会话除外，它们要原始的
+        # one-word/regex 输出，不能被"朗读书面化"污染）。
+        if not session_id.startswith("gate-"):
+            messages.insert(0, {"role": "system", "content": VOICE_FORMAT_SYSTEM_PROMPT})
         messages.append({"role": "user", "content": text})
         headers = {"Content-Type": "application/json"}
         if self.api_key:

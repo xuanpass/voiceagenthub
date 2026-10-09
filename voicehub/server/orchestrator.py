@@ -30,7 +30,7 @@ class Orchestrator:
             if abort is not None and abort.is_set():
                 return
             parts: list[str] = []
-            async for piece in self.backends[key].send(acc, f"{session}:{key}", ctx, abort):
+            async for piece in self.backends[key].send(acc, f"{session}:{key}", context=ctx, abort=abort):
                 parts.append(piece)
                 yield (key, piece)
                 if abort is not None and abort.is_set():
