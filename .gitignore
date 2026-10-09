@@ -54,23 +54,28 @@ temp/
 ! Dockerfile
 ! docker-compose.yml
 
-# 临时诊断脚本（voicehub 下，非项目核心资产，按需手动保留）
-voicehub/diag_hermes.py
-voicehub/verify_gate_apply.py
-voicehub/verify_gate_llm.py
-voicehub/verify_gate_mining.py
-# 一次性日志迁移脚本（硬编码绝对路径、只改 3 个文件日志级别），非项目资产，不入库
-voicehub/add_probe_logs.py
+# 调试运行目录（voicehub/debug/ 下集中存放调试/运行脚本与旧版运行文件副本，
+# 非项目核心资产；git 提交时只提交源码，调试运行代码一律不入库）
+voicehub/debug/
+# pytest 缓存（.pytest_cache/ 规则被下方 !voicehub/** 重新纳入，此处再排除）
+voicehub/.pytest_cache/
 
 # Python 字节码缓存（voicehub 下，因 !voicehub/** 重新纳入，这里再排除）
 voicehub/**/__pycache__/
 voicehub/**/*.pyc
 voicehub/**/*.pyo
 
-# 诊断产物（每通通话的音频/WAV 与转写文本，按需落盘，不入库）
+# 运行时产物：因 !voicehub/** 重新纳入整个 voicehub 源码树，以下运行时文件
+# 在此显式排除（源码 voicehub/server/voiceprint/ 仍纳入版本控制）
+voicehub/.env
+voicehub/.env.*
+voicehub/run.log
+voicehub/recordings/
 voicehub/server/recordings/
+voicehub/transcripts/
 voicehub/server/transcripts/
+voicehub/voiceprints/
 
-# 运行时诊断产物：每通通话的麦克风转写文本（由 CallTranscriptRecorder 生成）
-# 纯排查用，非项目核心资产，不入库
-voicehub/server/transcripts/
+# 本地模型权重与 SSL 私钥，不入库
+models/
+ssl/
