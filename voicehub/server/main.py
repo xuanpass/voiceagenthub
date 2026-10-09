@@ -232,7 +232,14 @@ _GATE_REVIEWER: Optional[LLMReviewer] = None  # set on startup when backends are
 # 声纹子系统全局单例：embedder 懒加载（模型缺失时 enabled=False，服务照常启动），
 # registry 声明式持久化——只有命名声纹落盘 voiceprints/voiceprints.json，
 # 临时簇（匿名攒段）故意不落盘，避免无人认领的簇跨重启累积。
-_VP_EMBEDDER = SpeakerEmbedder()
+# 模型路径解析同 sensevoice: env VOICEPRINT_MODEL_PATH > agents.yaml voiceprint.model_path
+# > embedder.DEFAULT_MODEL_PATH。
+_VP_EMBEDDER = SpeakerEmbedder(
+    model_path=(
+        os.getenv("VOICEPRINT_MODEL_PATH")
+        or (_CONFIG.get("voiceprint", {}).get("model_path") or None)
+    )
+)
 _VP_REGISTRY = VoiceprintRegistry(
     persist_path=str(Path(__file__).resolve().parent.parent / "voiceprints" / "voiceprints.json"),
 )

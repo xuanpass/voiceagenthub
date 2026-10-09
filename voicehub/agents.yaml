@@ -24,6 +24,11 @@ stt:
   device: cpu
   compute_type: int8
 
+voiceprint:
+  # 声纹嵌入模型路径 (3D-Speaker ERes2Net base zh ONNX); env VOICEPRINT_MODEL_PATH 可覆盖。
+  # 默认值见 server/voiceprint/embedder.py 的 DEFAULT_MODEL_PATH。
+  model_path: /home/wangxuan/voicehub/models/3dspeaker-eres2net-base-zh/model.onnx
+
 agents:
   openclaw:
     display: 小克
