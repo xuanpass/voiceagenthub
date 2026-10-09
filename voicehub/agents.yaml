@@ -15,6 +15,9 @@ server:
   port: 8765
 
 stt:
+  # STT 引擎选型: whisper | sensevoice。部署机 .101 的 voicehub/.env 用
+  # ACTIVE_STT_BACKEND=sensevoice 覆盖此默认; 此处默认 whisper 仅作无 env 场景兜底。
+  active: whisper
   model: small
   device: cpu
   compute_type: int8

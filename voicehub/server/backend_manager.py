@@ -37,11 +37,11 @@ class BackendManager:
         self._init_tts_backends()
         
         # 当前活跃后端: ACTIVE_LLM_BACKEND 未显式设置时, 回落到 agents.yaml 的
-        # default_agent (hermes), 与路由默认一致; STT/TTS 维持原默认。
+        # default_agent (hermes), 与路由默认一致; STT 在 _init_stt_backends 内
+        # 按 env > agents.yaml stt.active 解析 (sensevoice 回落时同步改写); TTS 维持原默认。
         self.active_llm_backend: str = os.getenv("ACTIVE_LLM_BACKEND") or getattr(
             self, "_default_agent", "hermes"
         )
-        self.active_stt_backend: str = os.getenv("ACTIVE_STT_BACKEND", "whisper")
         self.active_tts_backend: str = os.getenv("ACTIVE_TTS_BACKEND", "edge")
     
     def _init_llm_backends(self) -> None:
@@ -60,8 +60,16 @@ class BackendManager:
         self._default_agent = config.get("default_agent", "hermes")
     
     def _init_stt_backends(self) -> None:
-        """初始化STT后端（只实例化真正启用的那个，避免两个模型同时占内存）"""
-        active = os.getenv("ACTIVE_STT_BACKEND", "whisper")
+        """初始化STT后端（只实例化真正启用的那个，避免两个模型同时占内存）。
+
+        配置优先级: env > agents.yaml stt 段 > 代码默认值。yaml 提供基准
+        (active/model/device/compute_type), 环境变量 (ACTIVE_STT_BACKEND /
+        WHISPER_*) 可覆盖以便单机临时切换。active_stt_backend 在这里一并
+        解析: sensevoice 成功即用, 失败回落 whisper 时同步改写 env 与属性。
+        """
+        from .config import load_config
+        stt_cfg = load_config().get("stt", {})
+        active = os.getenv("ACTIVE_STT_BACKEND") or stt_cfg.get("active", "whisper")
 
         if active == "sensevoice":
             # SenseVoiceSmall (INT8 ONNX)：非自回归(CTC)，静音/噪声段不会像 Whisper
@@ -73,6 +81,7 @@ class BackendManager:
                 )
                 sv_dir = os.getenv("SENSEVOICE_MODEL_DIR") or DEFAULT_SENSEVOICE_DIR
                 self.stt_backends["sensevoice"] = SenseVoiceSTTService(model_dir=sv_dir)
+                self.active_stt_backend = "sensevoice"
                 logging.getLogger(__name__).warning(
                     '[PROBE-STT] sensevoice backend registered'
                 )
@@ -83,23 +92,33 @@ class BackendManager:
                 )
                 # 回落：把 active 改写成 whisper，后续 get_stt_backend() 才不会 KeyError
                 os.environ["ACTIVE_STT_BACKEND"] = "whisper"
+                active = "whisper"
 
         # Faster Whisper后端
         self.stt_backends["whisper"] = StreamingWhisperSTTService(
-            model=os.getenv("WHISPER_MODEL", "small"),
-            device=os.getenv("WHISPER_DEVICE", "cpu"),
-            compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
+            model=os.getenv("WHISPER_MODEL") or stt_cfg.get("model", "small"),
+            device=os.getenv("WHISPER_DEVICE") or stt_cfg.get("device", "cpu"),
+            compute_type=os.getenv("WHISPER_COMPUTE_TYPE") or stt_cfg.get("compute_type", "int8"),
         )
+        self.active_stt_backend = active
     
     def _init_tts_backends(self) -> None:
-        """初始化TTS后端"""
-        # Edge TTS后端
-        voice_map = {
-            "hermes": os.getenv("TTS_VOICE_HERMES", "zh-CN-YunxiNeural"),
-            "cherry": os.getenv("TTS_VOICE_CHERRY", "zh-CN-XiaoxiaoNeural"),
-            "openclaw": os.getenv("TTS_VOICE_OPENCLAW", "zh-CN-YunyangNeural"),
-        }
-        
+        """初始化TTS后端。voice_map 按 agent 名从 agents.yaml 构建, 不再硬编码
+        别名键 "cherry" (与 agent 名 cherrystudio 错位) ; disabled 的 agent 跳过。
+        env TTS_VOICE_<键大写> 可覆盖单个音色; cherrystudio 兼容旧键
+        TTS_VOICE_CHERRY (.env 遗留配置继续生效)。
+        """
+        from .config import load_config
+        agents = load_config().get("agents", {})
+        voice_map = {}
+        for key, a in agents.items():
+            if a.get("disabled"):
+                continue
+            voice = os.getenv(f"TTS_VOICE_{key.upper()}")
+            if voice is None and key == "cherrystudio":
+                voice = os.getenv("TTS_VOICE_CHERRY")
+            voice_map[key] = voice or a.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+
         self.tts_backends["edge"] = TTSEngine(voice_map=voice_map)
     
     def get_llm_backend(self, name: Optional[str] = None) -> LLMBackend:
