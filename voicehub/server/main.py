@@ -26,6 +26,7 @@ import uuid
 import json
 import time
 import wave
+from contextlib import asynccontextmanager
 from functools import wraps
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
@@ -63,6 +64,7 @@ from .router import Router
 from .tts import TTSEngine, TTS_CHANNELS, TTS_SAMPLE_RATE, split_sentences
 from .gate import GateProcessor, RuleEngine, GateLogger, LLMReviewer
 from .gate.optimizer import RuleOptimizer, RuleSuggestion
+from .voiceprint import SpeakerEmbedder, VoiceprintRegistry, SpeakerIdProcessor
 
 logger = logging.getLogger("voicehub")
 
@@ -226,6 +228,14 @@ _CONFIG, _BACKEND_MANAGER, _ROOM_MANAGER, _STT, _SRV = _build_stack()
 _RULE_ENGINE = RuleEngine()
 _GATE_LOGGER = GateLogger()
 _GATE_REVIEWER: Optional[LLMReviewer] = None  # set on startup when backends are warm
+
+# 声纹子系统全局单例：embedder 懒加载（模型缺失时 enabled=False，服务照常启动），
+# registry 声明式持久化——只有命名声纹落盘 voiceprints/voiceprints.json，
+# 临时簇（匿名攒段）故意不落盘，避免无人认领的簇跨重启累积。
+_VP_EMBEDDER = SpeakerEmbedder()
+_VP_REGISTRY = VoiceprintRegistry(
+    persist_path=str(Path(__file__).resolve().parent.parent / "voiceprints" / "voiceprints.json"),
+)
 
 
 def _init_gate_reviewer() -> None:
@@ -484,7 +494,16 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
     # VADUserStoppedSpeakingFrame，让 STT 可靠地把 partial 转成 final → 触发 LLM/TTS。
     # 输入音频已被 transport 重采样为 16k/mono，符合 Silero VAD 要求。
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=_vad_params))
-    pipeline = Pipeline([transport.input(), raw_rec, vad, stt, transcript_rec, gate_proc, router_proc, transport.output()])
+    # 声纹旁路：插在 VAD 之后、STT 之前——此处 16k/mono 帧齐全且 VAD 起止帧
+    # 已切好段；节点只监听不拦截（全帧 push_frame 转发），重计算走后台 task，
+    # 不给关键路径加延迟。事件经数据通道推给 client 页渲染说话人徽标。
+    speaker_proc = SpeakerIdProcessor(
+        embedder=_VP_EMBEDDER,
+        registry=_VP_REGISTRY,
+        connection_id=connection_id,
+        send_msg=lambda m: _send_client_msg(transport, m),
+    )
+    pipeline = Pipeline([transport.input(), raw_rec, vad, speaker_proc, stt, transcript_rec, gate_proc, router_proc, transport.output()])
     task = PipelineTask(pipeline)
     
     try:
@@ -504,7 +523,24 @@ async def _bot(webrtc_connection: SmallWebRTCConnection, room_id: Optional[str] 
         room.remove_connection(connection_id)
 
 
-app = FastAPI(title="VoiceHub", version="1.0.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup/shutdown via lifespan (replaces deprecated @app.on_event).
+
+    Registered at module level so both launch paths fire these hooks:
+      - python -m server.main            (app object)
+      - uvicorn.run("server.main:app")   (import string, used by run.py)
+    """
+    asyncio.create_task(_warmup_backends())
+    asyncio.create_task(_cleanup_zombie_tasks())
+    _init_gate_reviewer()
+    await _GATE_LOGGER.start()
+    yield
+    # graceful shutdown: cancel the gate flush loop and drain buffered records
+    await _GATE_LOGGER.stop()
+
+
+app = FastAPI(title="VoiceHub", version="1.0.0", lifespan=_lifespan)
 
 # 添加CORS中间件
 app.add_middleware(
@@ -692,6 +728,60 @@ async def gate_apply(request: Request):
     return JSONResponse({"applied": ok, "rule_version": _RULE_ENGINE.version})
 
 
+@app.get("/api/voiceprints")
+async def voiceprints_list():
+    """声纹一览：命名身份 + 匿名临时簇（不含 512 维原始质心）。"""
+    return JSONResponse(_VP_REGISTRY.snapshot())
+
+
+@app.post("/api/voiceprints/enroll")
+async def voiceprints_enroll(request: Request):
+    """临时簇转正命名：{"cluster_id": "vcxxxxxx", "name": "小明"}。"""
+    body = await request.json()
+    try:
+        _VP_REGISTRY.enroll_from_cluster(
+            str(body.get("cluster_id") or ""), str(body.get("name") or "")
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(_VP_REGISTRY.snapshot())
+
+
+@app.post("/api/voiceprints/merge")
+async def voiceprints_merge(request: Request):
+    """合并命名声纹（同人被分裂成两个名字时人工合一）：
+    {"source": "旧名", "target": "保留名"}，target 吸收 source 的段数。"""
+    body = await request.json()
+    try:
+        _VP_REGISTRY.merge(
+            str(body.get("source") or ""), str(body.get("target") or "")
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(_VP_REGISTRY.snapshot())
+
+
+@app.delete("/api/voiceprints/{target}")
+async def voiceprints_delete(target: str):
+    """删除命名声纹或临时簇，返回被删对象及类型（named/tentative）。"""
+    try:
+        kind = _VP_REGISTRY.delete(target)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return JSONResponse({"deleted": target, "kind": kind})
+
+
+@app.post("/api/voiceprints/clear")
+async def voiceprints_clear():
+    """清空全部声纹与临时簇（持久化文件同步清空）。"""
+    _VP_REGISTRY.clear()
+    return JSONResponse(_VP_REGISTRY.snapshot())
+
+
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint"""
@@ -778,14 +868,8 @@ async def offer(request: Request):
     return JSONResponse(answer)
 
 
-# Startup hooks must be registered at module level: run.py imports this
-# module (uvicorn.run("server.main:app")), so __main__-only hooks never fire.
-@app.on_event("startup")
-async def _on_startup():
-    asyncio.create_task(_warmup_backends())
-    asyncio.create_task(_cleanup_zombie_tasks())
-    _init_gate_reviewer()
-    await _GATE_LOGGER.start()
+# Startup hooks live in _lifespan() (registered at module level above), so
+# both `python -m server.main` and `uvicorn.run("server.main:app")` fire them.
 
 
 # 僵尸任务清理后台任务

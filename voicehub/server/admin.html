@@ -303,6 +303,15 @@
             </div>
             <div id="gateOptimizeResult"><span class="opt-status">点击「运行优化分析」基于门控日志挖掘新规则（需先有决策日志）。</span></div>
         </div>
+
+        <div class="section">
+            <h2>🔊 声纹 / 说话人管理</h2>
+            <div class="gate-opt-toolbar">
+                <button class="btn btn-primary" onclick="fetchVoiceprints()">刷新</button>
+                <button class="btn btn-danger" onclick="clearVoiceprints()">清空全部声纹</button>
+            </div>
+            <div id="voiceprintList">等待加载…</div>
+        </div>
     </div>
 
     <script>
@@ -323,6 +332,103 @@
             fetchGateStats();
             fetchGateRules();
             setInterval(fetchGateStats, 10000);
+
+            // 声纹面板：临时簇段数在通话期间持续变化，低频轮询即可
+            fetchVoiceprints();
+            setInterval(fetchVoiceprints, 15000);
+        }
+
+        // ========== 声纹 / 说话人管理 ==========
+        async function fetchVoiceprints() {
+            try {
+                const res = await fetch('/api/voiceprints');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const snap = await res.json();
+                window._vpSnap = snap;
+                renderVoiceprints(snap);
+            } catch (e) {
+                document.getElementById('voiceprintList').innerHTML = '<span class="opt-status">加载失败：' + escapeHtml(e.message) + '</span>';
+            }
+        }
+
+        function renderVoiceprints(snap) {
+            const out = document.getElementById('voiceprintList');
+            let html = '';
+            const named = snap.named || [];
+            html += '<h3>已命名（' + named.length + '）</h3>';
+            if (!named.length) {
+                html += '<div class="opt-status">暂无声纹。在客户端对匿名声音命名后会出现在这里。</div>';
+            }
+            named.forEach(n => {
+                const others = named.filter(x => x.name !== n.name)
+                    .map(x => '<option value="' + escapeHtml(x.name) + '">' + escapeHtml(x.name) + '</option>').join('');
+                html += '<div class="sug-card">' +
+                    '<div class="sug-head"><span class="sug-action">🗣️ ' + escapeHtml(n.name) + '</span>' +
+                    '<span class="sug-reason">' + (n.segments || 0) + ' 段 · 创建于 ' +
+                    new Date((n.created_at || 0) * 1000).toLocaleString() + '</span></div>' +
+                    '<div class="sug-meta">' +
+                    '<button class="btn btn-danger" onclick="deleteVoiceprint(\'' + encodeURIComponent(n.name) + '\')">删除</button> ' +
+                    (others ? '<select id="vp-merge-' + encodeURIComponent(n.name) + '">' + others + '</select> ' +
+                        '<button class="btn btn-primary" onclick="mergeVoiceprint(\'' + encodeURIComponent(n.name) + '\')">合并到所选</button>' : '') +
+                    '</div></div>';
+            });
+            const tentative = snap.tentative || [];
+            html += '<h3>匿名临时簇（' + tentative.length + '）</h3>';
+            if (!tentative.length) {
+                html += '<div class="opt-status">暂无临时簇。</div>';
+            }
+            tentative.forEach(t => {
+                html += '<div class="sug-card">' +
+                    '<div class="sug-head"><span class="sug-action sug-default">' + escapeHtml(t.cluster_id) + '</span>' +
+                    '<span class="sug-reason">' + (t.segments || 0) + ' 段 · 最近 ' +
+                    new Date((t.last_seen || 0) * 1000).toLocaleString() + '</span></div>' +
+                    '<div class="sug-meta">' +
+                    '<input type="text" id="vp-name-' + escapeHtml(t.cluster_id) + '" placeholder="起个名字" maxlength="16" ' +
+                    'style="padding:.3rem .5rem;border:1px solid #475569;border-radius:.35rem;background:#0f172a;color:#e2e8f0;"> ' +
+                    '<button class="btn btn-primary" onclick="enrollVoiceprint(\'' + escapeHtml(t.cluster_id) + '\')">命名转正</button> ' +
+                    '<button class="btn btn-danger" onclick="deleteVoiceprint(\'' + encodeURIComponent(t.cluster_id) + '\')">删除</button>' +
+                    '</div></div>';
+            });
+            out.innerHTML = html;
+        }
+
+        async function enrollVoiceprint(clusterId) {
+            const input = document.getElementById('vp-name-' + clusterId);
+            const name = (input && input.value || '').trim();
+            if (!name) { alert('请先输入名字'); return; }
+            await voiceprintOp('/api/voiceprints/enroll', 'POST', { cluster_id: clusterId, name });
+        }
+
+        async function deleteVoiceprint(encTarget) {
+            const target = decodeURIComponent(encTarget);
+            if (!confirm('确认删除「' + target + '」？')) return;
+            await voiceprintOp('/api/voiceprints/' + encodeURIComponent(target), 'DELETE');
+        }
+
+        async function mergeVoiceprint(encSource) {
+            const source = decodeURIComponent(encSource);
+            const sel = document.getElementById('vp-merge-' + encSource);
+            if (!sel || !sel.value) { alert('请选择合并目标'); return; }
+            if (!confirm('把「' + source + '」合并进「' + sel.value + '」？前者将被删除。')) return;
+            await voiceprintOp('/api/voiceprints/merge', 'POST', { source, target: sel.value });
+        }
+
+        async function clearVoiceprints() {
+            if (!confirm('清空全部声纹与临时簇？此操作不可恢复。')) return;
+            await voiceprintOp('/api/voiceprints/clear', 'POST');
+        }
+
+        async function voiceprintOp(url, method, body) {
+            try {
+                const res = await fetch(url, {
+                    method,
+                    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+                    body: body ? JSON.stringify(body) : undefined
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { alert('操作失败：' + (data.error || res.status)); return; }
+                await fetchVoiceprints();
+            } catch (e) { alert('操作失败: ' + e.message); }
         }
 
         // 获取系统统计

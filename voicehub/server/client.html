@@ -34,6 +34,13 @@
         .transcript .bubble-user { align-self: flex-end; background: #1d4ed8; color: #eff6ff; border-bottom-right-radius: .2rem; }
         .transcript .bubble-user-live { align-self: flex-end; background: #334155; color: #cbd5e1; border-bottom-right-radius: .2rem; font-style: italic; opacity: .85; }
         .transcript .bubble-bot { align-self: flex-start; background: #14532d; color: #dcfce7; border-bottom-left-radius: .2rem; }
+        .status.speaker-enrolled { background: #22c55e; color: #052e16; font-weight: 600; }
+        .status.speaker-tentative { background: #a855f7; color: #2e1065; font-weight: 600; }
+        .name-bar { display: none; gap: .5rem; align-items: center; margin-bottom: 1rem; padding: .6rem .75rem; background: #1e293b; border: 1px dashed #a855f7; border-radius: .5rem; font-size: .9rem; }
+        .name-bar.show { display: flex; flex-wrap: wrap; }
+        .name-bar input { flex: 1; min-width: 8rem; padding: .45rem .6rem; border: 1px solid #475569; border-radius: .35rem; background: #0f172a; color: #e2e8f0; font-size: .9rem; }
+        .name-bar button { padding: .45rem .9rem; font-size: .9rem; }
+        .name-bar button.ghost { background: #475569; }
     </style></head><body>
     <div class="header">
         <h1>🎤 VoiceHub 语音助手</h1>
@@ -44,6 +51,7 @@
         <div class="status" id="connection-status">未连接</div>
         <div class="status" id="speech-status">等待麦克风</div>
         <div class="status" id="agent-status">点击开始通话</div>
+        <div class="status" id="speaker-status">说话人：未识别</div>
     </div>
     <div class="waveform-container">
         <canvas id="waveform"></canvas>
@@ -57,6 +65,12 @@
         <button id="stop-btn" disabled>🔴 结束通话</button>
     </div>
     <div id="transcript" class="transcript"><div class="hint">对话转录将显示在这里：你说的话（蓝）和 AI 的回复（绿）。AI 回复同时也会用语音播报。</div></div>
+    <div id="name-bar" class="name-bar">
+        <span id="name-bar-hint">🎤 发现新声音</span>
+        <input id="name-input" placeholder="给这位说话人起个名字" maxlength="16">
+        <button id="name-save">命名</button>
+        <button id="name-skip" class="ghost">忽略</button>
+    </div>
     <div class="log-area" id="log-area"></div>
     <audio id="remote-audio" autoplay></audio>
     <script>
@@ -112,10 +126,61 @@
             _lastRole = 'bot';
             transcriptArea.scrollTop = transcriptArea.scrollHeight;
         }
+        const speakerStatus = document.getElementById('speaker-status');
+        const nameBar = document.getElementById('name-bar');
+        const nameBarHint = document.getElementById('name-bar-hint');
+        const nameInput = document.getElementById('name-input');
+        let _pendingCluster = null;   // 等待命名的临时簇 id
+        function updateSpeakerBadge(label, enrolled, confidence) {
+            const pct = Math.round((confidence || 0) * 100);
+            speakerStatus.textContent = (enrolled ? '🗣️ ' : '👤 ') + label + (enrolled ? '' : `（${pct}%）`);
+            speakerStatus.className = 'status ' + (enrolled ? 'speaker-enrolled' : 'speaker-tentative');
+        }
+        async function enrollPending(name) {
+            if (!_pendingCluster || !name) return;
+            try {
+                const res = await fetch('/api/voiceprints/enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cluster_id: _pendingCluster, name })
+                });
+                if (res.ok) {
+                    const snap = await res.json();
+                    addLog(`✅ 已命名「${name}」，之后会自动识别`, 'ok');
+                    updateSpeakerBadge(name, true, 1);
+                    hideNameBar();
+                    return snap;
+                }
+                const err = await res.json().catch(() => ({}));
+                addLog(`命名失败：${err.error || res.status}`, 'err');
+            } catch (ex) { addLog(`命名失败：${ex}`, 'err'); }
+        }
+        function hideNameBar() { _pendingCluster = null; nameBar.classList.remove('show'); nameInput.value = ''; }
         function handleAppMessage(e) {
             try {
                 const msg = JSON.parse(e.data);
-                if (msg && msg.type === 'transcript') addTranscript(msg.role, msg.text, !!msg.final);
+                if (!msg) return;
+                if (msg.type === 'transcript') { addTranscript(msg.role, msg.text, !!msg.final); return; }
+                if (msg.type === 'speaker') {
+                    // enrolled 身份直接上徽标；临时簇也显示（提示"这是第几个声音"）。
+                    // 同名重复事件去抖交给服务端（5s 冷却），前端只管渲染最新一条。
+                    if (msg.speaker && msg.speaker !== _pendingCluster) updateSpeakerBadge(msg.speaker, !!msg.enrolled, msg.confidence);
+                    if (msg.cluster_id && !msg.enrolled) {
+                        // 攒段中的匿名声音不动 name-bar（等 speaker_found 再弹命名条）
+                    }
+                    return;
+                }
+                if (msg.type === 'speaker_found') {
+                    // 新声音攒够段 → 弹命名条；同一簇只弹一次
+                    if (msg.cluster_id && msg.cluster_id !== _pendingCluster) {
+                        _pendingCluster = msg.cluster_id;
+                        nameBarHint.textContent = `🎤 发现新声音（${msg.segments} 段语音），起个名字：`;
+                        nameBar.classList.add('show');
+                        nameInput.focus();
+                        addLog(`发现新声音 ${msg.cluster_id}（${msg.segments} 段），请命名`, 'warn');
+                    }
+                    return;
+                }
             } catch (_) {}
         }
 
@@ -347,12 +412,27 @@
             _openBubble = null;
             speechStatus.textContent = '等待麦克风';
             agentStatus.textContent = '点击开始通话';
+            speakerStatus.textContent = '说话人：未识别';
+            speakerStatus.className = 'status';
+            hideNameBar();
             startBtn.disabled = false;
             stopBtn.disabled = true;
             _cleaningUp = false;
         }
 
         startBtn.addEventListener('click', startCall);
+        document.getElementById('name-save').addEventListener('click', () => {
+            const name = nameInput.value.trim();
+            if (!name) { nameInput.focus(); return; }
+            enrollPending(name);
+        });
+        nameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && nameInput.value.trim()) enrollPending(nameInput.value.trim());
+        });
+        document.getElementById('name-skip').addEventListener('click', () => {
+            addLog('已忽略该匿名声音（本次通话不再提示）');
+            hideNameBar();
+        });
         stopBtn.addEventListener('click', () => {
             addLog('结束通话');
             cleanupCall();
