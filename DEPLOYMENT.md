@@ -34,25 +34,22 @@ cd voicehub
 pip install -r requirements.txt
 ```
 
-#### 3. 配置环境
+#### 3. 配置环境变量
 ```bash
-# 复制环境变量配置
-cp .env.example .env
-
-# 复制配置文件
-cp config.yaml.example config.yaml
+# 复制环境变量配置（config.py 只读取 voicehub/.env）
+cp voicehub/.env.example voicehub/.env
 ```
 
 #### 4. 编辑配置
 
-编辑`.env`文件配置你的API密钥和参数：
+编辑`voicehub/.env`文件配置你的API密钥和参数：
 ```bash
-nano .env
+nano voicehub/.env
 ```
 
-编辑`config.yaml`文件配置智能体和路由规则：
+编辑`voicehub/agents.yaml`文件配置智能体和路由规则：
 ```bash
-nano config.yaml
+nano voicehub/agents.yaml
 ```
 
 #### 5. 启动服务
@@ -72,8 +69,7 @@ python -m voicehub.server.main
 
 #### 2. 创建配置文件
 ```bash
-cp .env.example .env
-cp config.yaml.example config.yaml
+cp voicehub/.env.example voicehub/.env
 ```
 
 #### 3. 启动服务
@@ -201,34 +197,32 @@ docker-compose up prometheus grafana -d
 | VOICEHUB_SSL_KEY | SSL密钥路径 | 无 | 否 |
 | VOICEHUB_SSL_CERT | SSL证书路径 | 无 | 否 |
 
-### 配置文件（config.yaml）
+### 配置文件（voicehub/agents.yaml）
 
 ```yaml
+# 路由配置: 智能体别名 / 端点 / 音色 (config.py 读取)
+default_agent: hermes
+
 server:
   host: 0.0.0.0
   port: 8765
-  max_history: 24
-  default_room: default
-
-llm_backends:
-  openai:
-    endpoint: http://localhost:8642/v1/chat/completions
-    api_key: sk-123456
-    model: gpt-3.5-turbo
 
 stt:
+  active: whisper          # whisper | sensevoice
   model: small
   device: cpu
 
-tts:
-  active_backend: edge
-  voices:
-    hermes: zh-CN-YunxiNeural
+voiceprint:
+  model_path: /path/to/models/3dspeaker-eres2net-base-zh/model.onnx
 
 agents:
   hermes:
-    enabled: true
-    tts_voice: zh-CN-YunxiNeural
+    adapter: openai_compat
+    endpoint: http://localhost:8642/v1/chat/completions
+    api_key: "${HERMES_KEY}"
+    model: auto
+    tts_voice: zh-CN-YunyangNeural
+    session_prefix: voice-hermes
 ```
 
 ## 监控与运维
@@ -296,12 +290,15 @@ export HTTPS_PROXY=http://your-proxy:port
 
 ### Q: 如何添加新的智能体
 
-A: 编辑`config.yaml`文件，添加新的智能体配置：
+A: 编辑`voicehub/agents.yaml`文件，添加新的智能体配置：
 
 ```yaml
 agents:
   new_agent:
-    enabled: true
+    adapter: openai_compat
+    endpoint: http://host:port/v1/chat/completions
+    api_key: "${NEW_AGENT_KEY}"
+    model: auto
     tts_voice: zh-CN-YunyangNeural
     session_prefix: new_agent_
 ```
@@ -324,8 +321,8 @@ sudo systemctl restart voicehub
 ## 备份策略
 
 ### 需要备份的文件
-- `config.yaml` - 配置文件
-- `.env` - 环境变量
+- `voicehub/agents.yaml` - 路由配置（智能体别名/端点/音色）
+- `voicehub/.env` - 环境变量（含密钥）
 - `logs/` - 日志文件
 - `data/` - 会话数据（如存在）
 
@@ -337,7 +334,7 @@ BACKUP_DIR="/path/to/backups"
 DATE=$(date +%Y%m%d_%H%M%S)
 
 tar -czf $BACKUP_DIR/voicehub_backup_$DATE.tar.gz \
-    /path/to/voicehub/config.yaml \
+    /path/to/voicehub/agents.yaml \
     /path/to/voicehub/.env \
     /path/to/voicehub/logs
 

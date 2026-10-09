@@ -15,9 +15,8 @@ data/
 # Environment and configuration files
 .env
 .env.*
-# 保留示例配置文件
+# 根级 config.yaml 已废弃（配置在 voicehub/agents.yaml）
 config.yaml
-! config.yaml.example
 
 # Docker
 docker-compose.override.yml

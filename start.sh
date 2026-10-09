@@ -29,15 +29,10 @@ source "$VENV/bin/activate"
 echo "安装依赖..."
 pip install -r requirements.txt
 
-# 复制配置文件
-if [ ! -f ".env" ]; then
+# 复制环境变量配置（实际生效文件为 voicehub/.env, 由 config.py 读取）
+if [ ! -f "voicehub/.env" ]; then
     echo "复制环境变量配置文件..."
-    cp .env.example .env
-fi
-
-if [ ! -f "config.yaml" ]; then
-    echo "复制配置文件..."
-    cp config.yaml.example config.yaml
+    cp voicehub/.env.example voicehub/.env
 fi
 
 # 启动服务（main.py 使用相对导入，必须以包方式运行：python -m server.main）

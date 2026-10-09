@@ -23,8 +23,8 @@ pip install -r requirements.txt
 
 2. **配置环境变量**
 ```bash
-cp .env.example .env
-# 编辑 .env 文件配置你的API密钥和参数
+cp voicehub/.env.example voicehub/.env
+# 编辑 voicehub/.env 文件配置你的API密钥和参数
 ```
 
 3. **启动服务**
@@ -67,9 +67,8 @@ docker run -d -p 8765:8765 --name voicehub voicehub
 │   │   ├── router.py          # 路由逻辑
 │   │   ├── tts.py             # TTS引擎
 │   │   └── streaming_whisper.py # 流式STT
-│   └── config.yaml.example    # 配置示例
-├── .env.example               # 环境变量示例
-├── config.yaml.example        # 配置文件示例
+│   ├── agents.yaml            # 路由配置（别名/端点/音色）
+│   └── .env.example           # 环境变量示例
 ├── requirements.txt           # 依赖列表
 └── README.md                 # 项目文档
 ```
@@ -119,7 +118,7 @@ curl http://localhost:8765/room/your-room-id
 
 ### 配置文件
 
-可通过`config.yaml`文件配置更详细的系统参数，包括：
+可通过`voicehub/agents.yaml`文件配置更详细的系统参数，包括：
 - 智能体配置
 - 路由规则
 - 后端列表
